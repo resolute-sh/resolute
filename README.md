@@ -1,4 +1,4 @@
-<img src="_docs/imgs/logo.svg" alt="Resolute" width="45" height="45"># Resolute
+# Resolute <img src="_docs/imgs/logo.svg" alt="Resolute" width="45" height="45">
 Resolute is a **workflow-as-code framework** for Go, built on [Temporal](https://temporal.io). It provides type-safe abstractions that make building durable, fault-tolerant workflows feel natural.
 
 
