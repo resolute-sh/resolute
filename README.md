@@ -6,7 +6,7 @@ Resolute is a **workflow-as-code framework** for Go, built on [Temporal](https:/
 <p>
 <img src="_docs/imgs/logo.svg" alt="Resolute" width="300" height="300">
 </p>
-
+</div>
 > [!CAUTION]
 > **Resolute is a research project.**
 >
