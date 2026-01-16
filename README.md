@@ -63,6 +63,9 @@ func main() {
         Then(transform.ChunkDocuments(transform.Input{
             MaxTokens: 512,
         })).
+        Then(ollama.BatchEmbed(ollama.BatchEmbedInput{
+            Model: "text-embedding-embeddinggemma",
+        })).
         Then(qdrant.Upsert(qdrant.Input{
             Collection: "knowledge-base",
         })).
