@@ -1,10 +1,11 @@
 # Resolute
+Resolute is a **workflow-as-code framework** for Go, built on [Temporal](https://temporal.io). It provides type-safe abstractions that make building durable, fault-tolerant workflows feel natural.
 
 <p align="center">
-  <img src="_docs/imgs/logo.svg" alt="Resolute" width="400">
+  <img src="_docs/imgs/logo.svg" alt="Resolute" width="30" height="30">
 </p>
 
-Resolute is a **workflow-as-code framework** for Go, built on [Temporal](https://temporal.io). It provides type-safe abstractions that make building durable, fault-tolerant workflows feel natural.
+
 
 > [!CAUTION]
 > **Resolute is a research project.**
