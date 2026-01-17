@@ -61,10 +61,11 @@ func main() {
             Since:   core.CursorFor("jira"),
         })).
         Then(transform.ChunkDocuments(transform.Input{
-            MaxTokens: 512,
+            DocumentsRef: core.OutputRef("jira_issues"),
         })).
-        Then(ollama.BatchEmbed(ollama.BatchEmbedInput{
-            Model: "text-embedding-embeddinggemma",
+        Then(ollama.BatchEmbed(ollama.Input{
+            Model:     "nomic-embed-text",
+            TextsRef:  core.OutputRef("chunks"),
         })).
         Then(qdrant.Upsert(qdrant.Input{
             Collection: "knowledge-base",
