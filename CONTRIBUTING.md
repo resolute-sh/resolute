@@ -1,6 +1,39 @@
 # Contributing to Resolute
 
-Thank you for your interest in contributing to Resolute!
+## About This Project
+
+Resolute is currently a **solo builder's project**. The primary goal is to create an AI agent framework that **just works out of the box**—no complex setup, no configuration hell, just workflows that run.
+
+This means development follows a focused roadmap rather than being driven by external contributions. That said, the project is open source and contributions are welcome within certain constraints.
+
+## Before You Contribute
+
+**Please reach out before starting work on a PR.** Given bandwidth constraints, it's better to discuss whether a contribution aligns with the current roadmap before you invest time. Open an issue or discussion first.
+
+Contributions most likely to be integrated:
+
+- Bug fixes with minimal footprint
+- Documentation improvements
+- Test coverage improvements
+- Small, focused changes that don't alter core architecture
+
+Contributions that need discussion first:
+
+- New features or nodes
+- Changes to core abstractions (flows, state, execution model)
+- New provider integrations
+- Anything that increases API surface area
+
+## Current Focus
+
+The current priority is making Resolute a **batteries-included framework** for building AI agents:
+
+1. Core primitives that compose well
+2. State management that's invisible when you don't need it, powerful when you do
+3. Providers that just work
+4. Clear, practical documentation
+
+Contributions aligned with these goals have a better chance of being reviewed and merged.
 
 ## Development Setup
 
@@ -20,10 +53,7 @@ Thank you for your interest in contributing to Resolute!
 
 3. **Install development tools**
    ```bash
-   # golangci-lint for linting
    brew install golangci-lint
-
-   # Or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
    ```
 
 4. **Verify setup**
@@ -33,103 +63,34 @@ Thank you for your interest in contributing to Resolute!
 
 ## Development Workflow
 
-### Running Tests
-
 ```bash
 # Run all tests
 make test
 
-# Run core tests only
-make test-core
-
-# Run provider tests only
-make test-providers
-
-# Run with coverage
-make coverage
-```
-
-### Code Quality
-
-```bash
 # Run linter
 make lint
 
 # Format code
 make fmt
 
-# Run go vet
-make vet
-```
-
-### Building
-
-```bash
 # Build all modules
 make build
-
-# Verify dependencies
-make verify
 ```
-
-## Pull Request Process
-
-1. **Fork the repository** and create your branch from `main`
-
-2. **Make your changes**
-   - Write or update tests as needed
-   - Follow existing code style and patterns
-   - Update documentation if applicable
-
-3. **Ensure quality checks pass**
-   ```bash
-   make lint test
-   ```
-
-4. **Write a clear commit message**
-   - Use present tense ("Add feature" not "Added feature")
-   - Reference issues if applicable ("Fix #123: ...")
-
-5. **Submit a pull request**
-   - Describe what changes you made and why
-   - Link to any related issues
 
 ## Code Style
 
-- Follow standard Go conventions (`gofmt`, `go vet`)
-- Use meaningful variable and function names
-- Add comments for exported functions and types
-- Keep functions focused and small
-- Write table-driven tests with `t.Parallel()`
+- Standard Go conventions (`gofmt`, `go vet`)
+- Meaningful names over comments
+- Small, focused functions
+- Table-driven tests with `t.Parallel()`
 
-## Project Structure
+## Pull Request Process
 
-```
-resolute/
-├── core/           # Core framework (flows, nodes, state, etc.)
-├── state/          # State persistence backends
-└── internal/       # Internal packages
-
-resolute-{provider}/  # Provider packages (jira, qdrant, etc.)
-├── provider.go     # Provider implementation
-├── client.go       # API client
-└── *_test.go       # Tests
-
-resolute-docs/      # Documentation site
-```
-
-## Adding a New Provider
-
-1. Create a new module: `resolute-{name}/`
-2. Implement the `core.Provider` interface
-3. Add typed input/output structs
-4. Create helper functions returning `*core.Node[I, O]`
-5. Write comprehensive tests
-6. Add documentation
+1. **Discuss first** - Open an issue or discussion
+2. **Keep it small** - Focused changes are easier to review
+3. **Tests pass** - `make lint test` must succeed
+4. **Clear description** - Explain the what and why
 
 ## Questions?
 
-- Open an issue for bugs or feature requests
-- Check existing issues before creating new ones
-
-Thank you for contributing!
+Open an issue. Bug reports and questions are always welcome, even if PR bandwidth is limited.
