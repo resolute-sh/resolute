@@ -1,7 +1,7 @@
 <div class="title-block" style="text-align: center;" align="center">
 
 # Resolute 
-Resolute is a **workflow-as-code framework** for Go, built on [Temporal](https://temporal.io). It provides type-safe abstractions that make building durable, fault-tolerant workflows feel natural.
+Resolute is a **Agent Orchestration as Code framework** for Go, built on [Temporal](https://temporal.io). It provides type-safe abstractions that make building durable, fault-tolerant workflows feel natural.
 
 <p>
 <img src="_docs/imgs/logo.svg" alt="Resolute" width="300" height="300">
