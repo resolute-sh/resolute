@@ -2,6 +2,13 @@ package core
 
 import "go.temporal.io/sdk/workflow"
 
+// WindowedNode extends ExecutableNode with window configuration.
+// Nodes that implement this interface support batched/windowed processing.
+type WindowedNode interface {
+	ExecutableNode
+	WindowConfig() Window
+}
+
 // ExecutableNode is the interface implemented by all nodes that can be executed
 // within a flow. This allows type-erased storage of generic nodes in flow steps.
 type ExecutableNode interface {

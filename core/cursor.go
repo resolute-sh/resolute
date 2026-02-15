@@ -88,6 +88,12 @@ func IsOutputRefMarker(ref DataRef) bool {
 	return ref.Backend == dataRefMarkerBackend
 }
 
+// WindowOutput creates a DataRef marker that resolves to the current windowed batch's output.
+// In windowed execution, the framework stores each batch's output under the "__window__" key.
+func WindowOutput() DataRef {
+	return OutputRef("__window__")
+}
+
 // resolve processes an input struct and replaces magic markers with actual values.
 func resolve[I any](input I, state *FlowState) (I, error) {
 	val := reflect.ValueOf(&input).Elem()

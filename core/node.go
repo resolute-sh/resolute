@@ -4,11 +4,25 @@ package core
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
+
+// CursorUpdateConfig defines how a node updates a cursor after execution.
+type CursorUpdateConfig struct {
+	Source string
+	Field  string
+}
+
+// Window configures batched/windowed processing for a node.
+// When attached to a node in a parallel step, the framework loops:
+// fetch batch → run downstream pipeline → persist cursors → repeat.
+type Window struct {
+	Size int // max items per batch (0 = disabled, fetch all)
+}
 
 // Node represents a single Temporal Activity with typed input/output.
 // Provider functions return ready-to-use nodes with direct struct inputs.
@@ -22,6 +36,8 @@ type Node[I, O any] struct {
 	rateLimiterID   string
 	validate        bool
 	errorClassifier ErrorClassifier
+	cursorUpdate    *CursorUpdateConfig
+	window          *Window
 }
 
 // ActivityOptions configures retry and timeout behavior for a node.
@@ -139,6 +155,29 @@ func (n *Node[I, O]) WithErrorClassifier(fn ErrorClassifier) *Node[I, O] {
 	return n
 }
 
+// WithCursorUpdate configures the node to update a cursor after successful execution.
+// The named field is extracted from the activity output and persisted as the cursor position.
+func (n *Node[I, O]) WithCursorUpdate(source, field string) *Node[I, O] {
+	n.cursorUpdate = &CursorUpdateConfig{Source: source, Field: field}
+	return n
+}
+
+// WithWindow configures batched/windowed processing for this node.
+// When used in a parallel step, the framework runs the downstream pipeline
+// per batch instead of waiting for all data.
+func (n *Node[I, O]) WithWindow(w Window) *Node[I, O] {
+	n.window = &w
+	return n
+}
+
+// WindowConfig returns the window configuration. Returns zero Window if not set.
+func (n *Node[I, O]) WindowConfig() Window {
+	if n.window == nil {
+		return Window{}
+	}
+	return *n.window
+}
+
 // Name returns the node's identifier.
 func (n *Node[I, O]) Name() string {
 	return n.name
@@ -192,6 +231,11 @@ func (n *Node[I, O]) Execute(ctx workflow.Context, state *FlowState) error {
 		return err
 	}
 
+	if n.window != nil {
+		meta := state.GetWindowMeta()
+		injectWindowFields(&resolvedInput, meta.Cursor, meta.Size)
+	}
+
 	if n.validate {
 		if err := Validate(resolvedInput); err != nil {
 			validationErr := fmt.Errorf("input validation failed for %s: %w", n.name, err)
@@ -236,6 +280,10 @@ func (n *Node[I, O]) Execute(ctx workflow.Context, state *FlowState) error {
 
 	state.SetResult(n.OutputKey(), result)
 
+	if n.cursorUpdate != nil {
+		extractAndSetCursor(state, result, n.cursorUpdate)
+	}
+
 	return nil
 }
 
@@ -262,6 +310,54 @@ func (n *Node[I, O]) Compensate(ctx workflow.Context, state *FlowState) error {
 		return nil
 	}
 	return n.compensation.Execute(ctx, state)
+}
+
+// extractAndSetCursor extracts a time field from a result and updates the cursor in state.
+func extractAndSetCursor[O any](state *FlowState, result O, cfg *CursorUpdateConfig) {
+	val := reflect.ValueOf(result)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+	if val.Kind() != reflect.Struct {
+		return
+	}
+
+	field := val.FieldByName(cfg.Field)
+	if !field.IsValid() {
+		return
+	}
+
+	var position string
+	switch v := field.Interface().(type) {
+	case time.Time:
+		if !v.IsZero() {
+			position = v.Format(time.RFC3339)
+		}
+	case *time.Time:
+		if v != nil && !v.IsZero() {
+			position = v.Format(time.RFC3339)
+		}
+	case string:
+		position = v
+	}
+
+	if position != "" {
+		state.SetCursor(cfg.Source, position)
+	}
+}
+
+// injectWindowFields sets WindowCursor and WindowSize fields on an input struct via reflection.
+func injectWindowFields[I any](input *I, cursor string, size int) {
+	val := reflect.ValueOf(input).Elem()
+	if val.Kind() != reflect.Struct {
+		return
+	}
+	if f := val.FieldByName("WindowCursor"); f.IsValid() && f.CanSet() && f.Kind() == reflect.String {
+		f.SetString(cursor)
+	}
+	if f := val.FieldByName("WindowSize"); f.IsValid() && f.CanSet() && f.Kind() == reflect.Int {
+		f.SetInt(int64(size))
+	}
 }
 
 // resolveInput processes the input struct to replace magic markers with actual values.

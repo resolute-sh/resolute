@@ -7,9 +7,11 @@ import (
 	"os"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 )
 
 const (
@@ -162,7 +164,9 @@ func (b *WorkerBuilder) Build() error {
 	b.worker = worker.New(c, b.config.TaskQueue, opts)
 
 	if b.flow != nil {
-		b.worker.RegisterWorkflow(b.flow.Execute)
+		b.worker.RegisterWorkflowWithOptions(b.flow.Execute, workflow.RegisterOptions{
+			Name: b.flow.Name(),
+		})
 	}
 
 	for _, p := range b.providers {
@@ -171,6 +175,11 @@ func (b *WorkerBuilder) Build() error {
 				Name: act.Name,
 			})
 		}
+	}
+
+	if err := b.setupSchedule(); err != nil {
+		b.client.Close()
+		return fmt.Errorf("setup schedule: %w", err)
 	}
 
 	if b.webhookAddr != "" && b.flow != nil {
@@ -350,6 +359,55 @@ func (b *WorkerBuilder) runProviderHealthChecks() error {
 		}
 	}
 
+	return nil
+}
+
+func (b *WorkerBuilder) setupSchedule() error {
+	if b.flow == nil || b.flow.Trigger() == nil || b.flow.Trigger().Type() != TriggerSchedule {
+		return nil
+	}
+
+	cronExpr := b.flow.Trigger().Config().CronSchedule
+	scheduleID := b.flow.Name() + "-schedule"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	action := &client.ScheduleWorkflowAction{
+		ID:                       b.flow.Name(),
+		Workflow:                 b.flow.Name(),
+		TaskQueue:                b.config.TaskQueue,
+		WorkflowExecutionTimeout: 1 * time.Hour,
+	}
+
+	_, err := b.client.ScheduleClient().Create(ctx, client.ScheduleOptions{
+		ID:      scheduleID,
+		Spec:    client.ScheduleSpec{CronExpressions: []string{cronExpr}},
+		Action:  action,
+		Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
+	})
+	if err == nil {
+		log.Printf("Created schedule %s (cron: %s)", scheduleID, cronExpr)
+		return nil
+	}
+
+	handle := b.client.ScheduleClient().GetHandle(ctx, scheduleID)
+	updateErr := handle.Update(ctx, client.ScheduleUpdateOptions{
+		DoUpdate: func(input client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
+			input.Description.Schedule.Spec = &client.ScheduleSpec{
+				CronExpressions: []string{cronExpr},
+			}
+			input.Description.Schedule.Action = action
+			return &client.ScheduleUpdate{
+				Schedule: &input.Description.Schedule,
+			}, nil
+		},
+	})
+	if updateErr != nil {
+		return fmt.Errorf("create schedule: %w; update schedule: %w", err, updateErr)
+	}
+
+	log.Printf("Updated schedule %s (cron: %s)", scheduleID, cronExpr)
 	return nil
 }
 

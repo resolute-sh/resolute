@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"go.temporal.io/sdk/workflow"
@@ -151,7 +152,18 @@ func (f *Flow) executeInternal(ctx workflow.Context, input FlowInput) error {
 
 	var compensations []CompensationEntry
 
-	for _, step := range f.steps {
+	for i, step := range f.steps {
+		if step.parallel && hasWindowedNodes(step) {
+			downstream := f.steps[i+1:]
+			if err := executeWindowed(ctx, step, downstream, state, f.name, f.stateConfig); err != nil {
+				return runCompensations(ctx, compensations, state, err)
+			}
+			if err := state.SavePersisted(ctx, f.name, f.stateConfig); err != nil {
+				return fmt.Errorf("save persisted state: %w", err)
+			}
+			return nil
+		}
+
 		if step.conditional != nil {
 			if err := executeConditional(ctx, step.conditional, state, f.name, &compensations); err != nil {
 				return runCompensations(ctx, compensations, state, err)
@@ -195,38 +207,37 @@ func executeSequential(ctx workflow.Context, step Step, state *FlowState, flowNa
 
 // executeParallel runs multiple nodes concurrently and waits for all to complete.
 func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName string, compensations *[]CompensationEntry) error {
-	// Use Temporal's selector for parallel execution
-	selector := workflow.NewSelector(ctx)
-	results := make(chan error, len(step.nodes))
+	preSnapshot := state.Snapshot()
 
-	for _, node := range step.nodes {
-		n := node // capture for closure
-		future := workflow.ExecuteActivity(ctx, func(actCtx workflow.Context) error {
-			return n.Execute(actCtx, state)
-		})
-		selector.AddFuture(future, func(f workflow.Future) {
-			results <- f.Get(ctx, nil)
-		})
+	errs := make([]error, len(step.nodes))
+	doneCh := workflow.NewBufferedChannel(ctx, len(step.nodes))
 
-		// Track for compensation
-		if n.HasCompensation() {
+	for i, node := range step.nodes {
+		idx := i
+		n := node
+		workflow.Go(ctx, func(gCtx workflow.Context) {
+			errs[idx] = n.Execute(gCtx, state)
+			doneCh.Send(gCtx, idx)
+		})
+	}
+
+	for range step.nodes {
+		var idx int
+		doneCh.Receive(ctx, &idx)
+	}
+
+	for i, err := range errs {
+		if err == nil && step.nodes[i].HasCompensation() {
 			*compensations = append(*compensations, CompensationEntry{
-				node:  n,
-				state: state.Snapshot(),
+				node:  step.nodes[i],
+				state: preSnapshot,
 			})
 		}
 	}
 
-	// Wait for all to complete
-	for range step.nodes {
-		selector.Select(ctx)
-	}
-	close(results)
-
-	// Check for errors
-	for err := range results {
+	for i, err := range errs {
 		if err != nil {
-			return WrapFlowError(flowName, step.name, "parallel", nil, err)
+			return WrapFlowError(flowName, step.name, step.nodes[i].Name(), step.nodes[i].Input(), err)
 		}
 	}
 
@@ -247,6 +258,142 @@ func runCompensations(ctx workflow.Context, compensations []CompensationEntry, s
 		}
 	}
 	return originalErr
+}
+
+// hasWindowedNodes returns true if any node in the step implements WindowedNode with Size > 0.
+func hasWindowedNodes(step Step) bool {
+	for _, node := range step.nodes {
+		if wn, ok := node.(WindowedNode); ok && wn.WindowConfig().Size > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// executeWindowed runs windowed nodes in parallel, each looping through batches
+// and executing the downstream pipeline per batch.
+func executeWindowed(ctx workflow.Context, step Step, downstream []Step, state *FlowState, flowName string, stateConfig *StateConfig) error {
+	errs := make([]error, len(step.nodes))
+	doneCh := workflow.NewBufferedChannel(ctx, len(step.nodes))
+
+	for i, node := range step.nodes {
+		idx := i
+		n := node
+		workflow.Go(ctx, func(gCtx workflow.Context) {
+			wn, ok := n.(WindowedNode)
+			if !ok || wn.WindowConfig().Size == 0 {
+				errs[idx] = n.Execute(gCtx, state)
+			} else {
+				errs[idx] = executeWindowedNode(gCtx, n, wn.WindowConfig(), downstream, state, flowName, stateConfig)
+			}
+			doneCh.Send(gCtx, idx)
+		})
+	}
+
+	for range step.nodes {
+		var idx int
+		doneCh.Receive(ctx, &idx)
+	}
+
+	for i, err := range errs {
+		if err != nil {
+			return WrapFlowError(flowName, step.name, step.nodes[i].Name(), step.nodes[i].Input(), err)
+		}
+	}
+
+	return nil
+}
+
+// executeWindowedNode runs a single windowed node in a loop, executing the
+// downstream pipeline for each batch.
+func executeWindowedNode(ctx workflow.Context, node ExecutableNode, windowCfg Window, downstream []Step, parentState *FlowState, flowName string, stateConfig *StateConfig) error {
+	var windowCursor string
+
+	for batchNum := 0; ; batchNum++ {
+		batchState := parentState.NewBatchState()
+		batchState.SetWindowMeta(windowCursor, windowCfg.Size)
+
+		if err := node.Execute(ctx, batchState); err != nil {
+			return fmt.Errorf("batch %d fetch: %w", batchNum, err)
+		}
+
+		result := batchState.GetResult(node.OutputKey())
+		hasMore, nextCursor := extractWindowMeta(result)
+		windowCursor = nextCursor
+
+		batchState.SetResult("__window__", result)
+
+		var compensations []CompensationEntry
+		for _, step := range downstream {
+			if step.conditional != nil {
+				if err := executeConditional(ctx, step.conditional, batchState, flowName, &compensations); err != nil {
+					return fmt.Errorf("batch %d downstream %s: %w", batchNum, step.name, err)
+				}
+			} else if step.parallel {
+				if err := executeParallel(ctx, step, batchState, flowName, &compensations); err != nil {
+					return fmt.Errorf("batch %d downstream %s: %w", batchNum, step.name, err)
+				}
+			} else {
+				if err := executeSequential(ctx, step, batchState, flowName, &compensations); err != nil {
+					return fmt.Errorf("batch %d downstream %s: %w", batchNum, step.name, err)
+				}
+			}
+		}
+
+		mergeCursors(parentState, batchState)
+
+		if err := parentState.SavePersisted(ctx, flowName, stateConfig); err != nil {
+			return fmt.Errorf("batch %d save state: %w", batchNum, err)
+		}
+
+		if !hasMore {
+			break
+		}
+	}
+
+	return nil
+}
+
+// extractWindowMeta reads HasMore and WindowCursor from a result struct via reflection.
+func extractWindowMeta(result interface{}) (hasMore bool, cursor string) {
+	if result == nil {
+		return false, ""
+	}
+	val := reflect.ValueOf(result)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+	if val.Kind() != reflect.Struct {
+		return false, ""
+	}
+
+	if f := val.FieldByName("HasMore"); f.IsValid() && f.Kind() == reflect.Bool {
+		hasMore = f.Bool()
+	}
+	if f := val.FieldByName("WindowCursor"); f.IsValid() && f.Kind() == reflect.String {
+		cursor = f.String()
+	}
+	return hasMore, cursor
+}
+
+// mergeCursors updates parent cursors with batch cursors, keeping the later position.
+// RFC3339 string comparison preserves chronological order.
+func mergeCursors(parent, batch *FlowState) {
+	batch.mu.RLock()
+	batchCursors := make(map[string]Cursor, len(batch.cursors))
+	for k, v := range batch.cursors {
+		batchCursors[k] = v
+	}
+	batch.mu.RUnlock()
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	for source, batchCursor := range batchCursors {
+		parentCursor, exists := parent.cursors[source]
+		if !exists || batchCursor.Position > parentCursor.Position {
+			parent.cursors[source] = batchCursor
+		}
+	}
 }
 
 // FlowInput contains the initial input to a flow execution.

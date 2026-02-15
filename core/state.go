@@ -10,6 +10,12 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
+// WindowMeta holds ephemeral window cursor and size for the current batch iteration.
+type WindowMeta struct {
+	Cursor string
+	Size   int
+}
+
 // FlowState carries data through workflow execution.
 // It holds input data, activity outputs, and cursor state for incremental processing.
 type FlowState struct {
@@ -17,8 +23,9 @@ type FlowState struct {
 	input   map[string][]byte // Serialized initial input
 	// results holds activity outputs. Untyped storage required because activities
 	// return heterogeneous types; type safety restored via Get[T]() accessor.
-	results map[string]any
-	cursors map[string]Cursor // Loaded from persisted state
+	results    map[string]any
+	cursors    map[string]Cursor // Loaded from persisted state
+	windowMeta *WindowMeta       // Ephemeral, set by windowed executor per batch
 }
 
 // Cursor tracks incremental processing position for a data source.
@@ -72,6 +79,40 @@ func (s *FlowState) SetCursor(source, position string) {
 		Position:  position,
 		UpdatedAt: time.Now(),
 	}
+}
+
+// SetWindowMeta sets the ephemeral window cursor and size for the current batch.
+func (s *FlowState) SetWindowMeta(cursor string, size int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.windowMeta = &WindowMeta{Cursor: cursor, Size: size}
+}
+
+// GetWindowMeta returns the current window meta. Returns zero WindowMeta if not set.
+func (s *FlowState) GetWindowMeta() WindowMeta {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.windowMeta == nil {
+		return WindowMeta{}
+	}
+	return *s.windowMeta
+}
+
+// NewBatchState creates an isolated state for a windowed batch.
+// Inherits input and cursors from parent. Results and window meta start empty.
+func (s *FlowState) NewBatchState() *FlowState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	batch := &FlowState{
+		input:   s.input,
+		results: make(map[string]any),
+		cursors: make(map[string]Cursor),
+	}
+	for k, v := range s.cursors {
+		batch.cursors[k] = v
+	}
+	return batch
 }
 
 // Snapshot creates a copy of the current state for compensation.
@@ -138,7 +179,25 @@ func getBackend(cfg *StateConfig) StateBackend {
 	if cfg != nil && cfg.Backend != nil {
 		return cfg.Backend
 	}
+	if defaultLocalBackend == nil {
+		defaultLocalBackend = newInMemoryBackend()
+	}
 	return defaultLocalBackend
+}
+
+// inMemoryBackend is a no-op state backend used when no backend is configured.
+type inMemoryBackend struct{}
+
+func newInMemoryBackend() *inMemoryBackend {
+	return &inMemoryBackend{}
+}
+
+func (b *inMemoryBackend) Load(workflowID, flowName string) (*PersistedState, error) {
+	return nil, nil
+}
+
+func (b *inMemoryBackend) Save(workflowID, flowName string, state *PersistedState) error {
+	return nil
 }
 
 // Time parses the cursor position as a time.Time value.
