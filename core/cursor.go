@@ -14,6 +14,8 @@ const (
 	outputMarkerSuffix = "}}"
 	cursorMarkerPrefix = "{{cursor:"
 	cursorMarkerSuffix = "}}"
+	inputMarkerPrefix  = "{{input:"
+	inputMarkerSuffix  = "}}"
 )
 
 // cursorMarkerID is used to generate unique IDs for cursor markers.
@@ -62,6 +64,19 @@ func Output(path string) string {
 // CursorString creates a string marker for cursor reference (for string fields).
 func CursorString(source string) string {
 	return cursorMarkerPrefix + source + cursorMarkerSuffix
+}
+
+// InputData creates a magic marker that resolves to a value from the flow's initial input.
+// Webhook-triggered flows store payload data in FlowInput; this marker provides
+// access from activity input structs.
+//
+// Example:
+//
+//	bitbucket.ParseWebhook(bitbucket.ParseWebhookInput{
+//	    RawPayload: core.InputData("webhook_payload"),
+//	})
+func InputData(key string) string {
+	return inputMarkerPrefix + key + inputMarkerSuffix
 }
 
 const (
@@ -290,7 +305,7 @@ func resolveCursorValue(val reflect.Value, state *FlowState) error {
 	return nil
 }
 
-// resolveStringMarkers resolves output and cursor string markers.
+// resolveStringMarkers resolves output, cursor, and input string markers.
 func resolveStringMarkers(s string, state *FlowState) (string, error) {
 	if strings.HasPrefix(s, outputMarkerPrefix) && strings.HasSuffix(s, outputMarkerSuffix) {
 		path := s[len(outputMarkerPrefix) : len(s)-len(outputMarkerSuffix)]
@@ -305,6 +320,15 @@ func resolveStringMarkers(s string, state *FlowState) (string, error) {
 		source := s[len(cursorMarkerPrefix) : len(s)-len(cursorMarkerSuffix)]
 		cursor := state.GetCursor(source)
 		return cursor.Position, nil
+	}
+
+	if strings.HasPrefix(s, inputMarkerPrefix) && strings.HasSuffix(s, inputMarkerSuffix) {
+		key := s[len(inputMarkerPrefix) : len(s)-len(inputMarkerSuffix)]
+		data, ok := state.GetInputData(key)
+		if !ok {
+			return "", fmt.Errorf("no input data for key %q", key)
+		}
+		return string(data), nil
 	}
 
 	return s, nil

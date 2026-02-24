@@ -44,6 +44,15 @@ func NewFlowState(input FlowInput) *FlowState {
 	}
 }
 
+// GetInputData retrieves raw input data by key.
+// Returns the byte slice and whether the key was found.
+func (s *FlowState) GetInputData(key string) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	data, ok := s.input[key]
+	return data, ok
+}
+
 // GetResult retrieves a raw result by key. Returns any because activity result
 // types vary; prefer typed Get[T]() for compile-time type safety.
 func (s *FlowState) GetResult(key string) any {
