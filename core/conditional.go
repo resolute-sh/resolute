@@ -160,7 +160,7 @@ func (cb *ConditionalBuilder) EndWhen() *FlowBuilder {
 }
 
 // executeConditional evaluates the predicate and executes the appropriate branch.
-func executeConditional(ctx workflow.Context, config *ConditionalConfig, state *FlowState, flowName string, compensations *[]CompensationEntry) error {
+func executeConditional(ctx workflow.Context, config *ConditionalConfig, state *FlowState, flowName string, compensations *[]CompensationEntry, hooks *FlowHooks) error {
 	var stepsToExecute []Step
 	if config.predicate(state) {
 		stepsToExecute = config.thenSteps
@@ -170,15 +170,15 @@ func executeConditional(ctx workflow.Context, config *ConditionalConfig, state *
 
 	for _, step := range stepsToExecute {
 		if step.conditional != nil {
-			if err := executeConditional(ctx, step.conditional, state, flowName, compensations); err != nil {
+			if err := executeConditional(ctx, step.conditional, state, flowName, compensations, hooks); err != nil {
 				return err
 			}
 		} else if step.parallel {
-			if err := executeParallel(ctx, step, state, flowName, compensations); err != nil {
+			if err := executeParallel(ctx, step, state, flowName, compensations, hooks); err != nil {
 				return err
 			}
 		} else {
-			if err := executeSequential(ctx, step, state, flowName, compensations); err != nil {
+			if err := executeSequential(ctx, step, state, flowName, compensations, hooks); err != nil {
 				return err
 			}
 		}

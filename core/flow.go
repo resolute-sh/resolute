@@ -14,16 +14,19 @@ type Flow struct {
 	trigger     Trigger
 	steps       []Step
 	stateConfig *StateConfig
+	hooks       *FlowHooks
 }
 
 // Step represents one execution unit within a flow.
 // A step can contain one node (sequential), multiple nodes (parallel),
-// or a conditional branch.
+// a conditional branch, a gate, or child workflows.
 type Step struct {
 	name        string
 	nodes       []ExecutableNode
 	parallel    bool
 	conditional *ConditionalConfig
+	gate        *GateNode
+	children    *ChildFlowNode
 }
 
 // FlowBuilder provides a fluent API for constructing flows.
@@ -82,6 +85,47 @@ func (b *FlowBuilder) ThenParallel(name string, nodes ...ExecutableNode) *FlowBu
 	return b
 }
 
+// WithHooks attaches lifecycle callbacks to the flow.
+// Hooks fire at flow, step, and node boundaries with structured context.
+func (b *FlowBuilder) WithHooks(hooks *FlowHooks) *FlowBuilder {
+	b.flow.hooks = hooks
+	return b
+}
+
+// ThenGate adds a gate step that pauses the flow until an external signal is received.
+// The gate waits for a Temporal signal matching config.SignalName carrying a GateResult.
+func (b *FlowBuilder) ThenGate(name string, config GateConfig) *FlowBuilder {
+	if config.SignalName == "" {
+		b.errors = append(b.errors, fmt.Errorf("gate %q: SignalName is required", name))
+		return b
+	}
+	gate := NewGateNode(name, config)
+	b.flow.steps = append(b.flow.steps, Step{
+		name: name,
+		gate: gate,
+	})
+	return b
+}
+
+// ThenChildren adds a step that spawns child workflows.
+// Each child receives input from the InputMapper applied to the parent's FlowState.
+func (b *FlowBuilder) ThenChildren(name string, config ChildFlowConfig) *FlowBuilder {
+	if config.Flow == nil {
+		b.errors = append(b.errors, fmt.Errorf("ThenChildren %q: Flow is required", name))
+		return b
+	}
+	if config.InputMapper == nil {
+		b.errors = append(b.errors, fmt.Errorf("ThenChildren %q: InputMapper is required", name))
+		return b
+	}
+	child := NewChildFlowNode(name, config)
+	b.flow.steps = append(b.flow.steps, Step{
+		name:     name,
+		children: child,
+	})
+	return b
+}
+
 // WithState overrides the default state backend (.resolute/).
 // Use this to configure cloud storage backends (S3, GCS) for production.
 func (b *FlowBuilder) WithState(cfg StateConfig) *FlowBuilder {
@@ -123,9 +167,16 @@ func (f *Flow) StateConfig() *StateConfig {
 	return f.stateConfig
 }
 
+// Hooks returns the flow's hook configuration, or nil if none set.
+func (f *Flow) Hooks() *FlowHooks {
+	return f.hooks
+}
+
 // Execute runs the flow as a Temporal workflow.
 func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 	startTime := time.Now()
+
+	invokeBeforeFlow(f.hooks, f.name)
 
 	err := f.executeInternal(ctx, input)
 
@@ -133,6 +184,8 @@ func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 	if err != nil {
 		status = "error"
 	}
+
+	invokeAfterFlow(f.hooks, f.name, time.Since(startTime), err)
 
 	RecordFlowExecution(RecordFlowExecutionInput{
 		FlowName: f.name,
@@ -155,7 +208,7 @@ func (f *Flow) executeInternal(ctx workflow.Context, input FlowInput) error {
 	for i, step := range f.steps {
 		if step.parallel && hasWindowedNodes(step) {
 			downstream := f.steps[i+1:]
-			if err := executeWindowed(ctx, step, downstream, state, f.name, f.stateConfig); err != nil {
+			if err := executeWindowed(ctx, step, downstream, state, f.name, f.stateConfig, f.hooks); err != nil {
 				return runCompensations(ctx, compensations, state, err)
 			}
 			if err := state.SavePersisted(ctx, f.name, f.stateConfig); err != nil {
@@ -164,16 +217,24 @@ func (f *Flow) executeInternal(ctx workflow.Context, input FlowInput) error {
 			return nil
 		}
 
-		if step.conditional != nil {
-			if err := executeConditional(ctx, step.conditional, state, f.name, &compensations); err != nil {
+		if step.gate != nil {
+			if err := executeGateStep(ctx, step, state, f.name, f.hooks); err != nil {
+				return runCompensations(ctx, compensations, state, err)
+			}
+		} else if step.children != nil {
+			if err := executeChildrenStep(ctx, step, state, f.name, f.hooks); err != nil {
+				return runCompensations(ctx, compensations, state, err)
+			}
+		} else if step.conditional != nil {
+			if err := executeConditional(ctx, step.conditional, state, f.name, &compensations, f.hooks); err != nil {
 				return runCompensations(ctx, compensations, state, err)
 			}
 		} else if step.parallel {
-			if err := executeParallel(ctx, step, state, f.name, &compensations); err != nil {
+			if err := executeParallel(ctx, step, state, f.name, &compensations, f.hooks); err != nil {
 				return runCompensations(ctx, compensations, state, err)
 			}
 		} else {
-			if err := executeSequential(ctx, step, state, f.name, &compensations); err != nil {
+			if err := executeSequential(ctx, step, state, f.name, &compensations, f.hooks); err != nil {
 				return runCompensations(ctx, compensations, state, err)
 			}
 		}
@@ -186,15 +247,53 @@ func (f *Flow) executeInternal(ctx workflow.Context, input FlowInput) error {
 	return nil
 }
 
+// executeGateStep runs a gate node within a step, invoking hooks.
+func executeGateStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	invokeBeforeNode(hooks, flowName, step.name, step.gate.Name())
+	nodeStart := time.Now()
+
+	err := step.gate.Execute(ctx, state)
+
+	invokeAfterNode(hooks, flowName, step.name, step.gate.Name(), time.Since(nodeStart), err)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+
+	return err
+}
+
+// executeChildrenStep runs child workflows within a step, invoking hooks.
+// Full implementation in Phase 0C.
+func executeChildrenStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	err := step.children.Execute(ctx, state)
+
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+	return err
+}
+
 // executeSequential runs a single node and tracks compensation.
-func executeSequential(ctx workflow.Context, step Step, state *FlowState, flowName string, compensations *[]CompensationEntry) error {
+func executeSequential(ctx workflow.Context, step Step, state *FlowState, flowName string, compensations *[]CompensationEntry, hooks *FlowHooks) error {
 	node := step.nodes[0]
 
-	if err := node.Execute(ctx, state); err != nil {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	invokeBeforeNode(hooks, flowName, step.name, node.Name())
+	nodeStart := time.Now()
+
+	err := node.Execute(ctx, state)
+
+	invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err)
+
+	if err != nil {
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
 		return WrapFlowError(flowName, step.name, node.Name(), node.Input(), err)
 	}
 
-	// Track for compensation if node has one
 	if node.HasCompensation() {
 		*compensations = append(*compensations, CompensationEntry{
 			node:  node,
@@ -202,11 +301,15 @@ func executeSequential(ctx workflow.Context, step Step, state *FlowState, flowNa
 		})
 	}
 
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
 	return nil
 }
 
 // executeParallel runs multiple nodes concurrently and waits for all to complete.
-func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName string, compensations *[]CompensationEntry) error {
+func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName string, compensations *[]CompensationEntry, hooks *FlowHooks) error {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
 	preSnapshot := state.Snapshot()
 
 	errs := make([]error, len(step.nodes))
@@ -216,7 +319,12 @@ func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName
 		idx := i
 		n := node
 		workflow.Go(ctx, func(gCtx workflow.Context) {
+			invokeBeforeNode(hooks, flowName, step.name, n.Name())
+			nodeStart := time.Now()
+
 			errs[idx] = n.Execute(gCtx, state)
+
+			invokeAfterNode(hooks, flowName, step.name, n.Name(), time.Since(nodeStart), errs[idx])
 			doneCh.Send(gCtx, idx)
 		})
 	}
@@ -237,10 +345,12 @@ func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName
 
 	for i, err := range errs {
 		if err != nil {
+			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
 			return WrapFlowError(flowName, step.name, step.nodes[i].Name(), step.nodes[i].Input(), err)
 		}
 	}
 
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
 	return nil
 }
 
@@ -272,7 +382,7 @@ func hasWindowedNodes(step Step) bool {
 
 // executeWindowed runs windowed nodes in parallel, each looping through batches
 // and executing the downstream pipeline per batch.
-func executeWindowed(ctx workflow.Context, step Step, downstream []Step, state *FlowState, flowName string, stateConfig *StateConfig) error {
+func executeWindowed(ctx workflow.Context, step Step, downstream []Step, state *FlowState, flowName string, stateConfig *StateConfig, hooks *FlowHooks) error {
 	errs := make([]error, len(step.nodes))
 	doneCh := workflow.NewBufferedChannel(ctx, len(step.nodes))
 
@@ -284,7 +394,7 @@ func executeWindowed(ctx workflow.Context, step Step, downstream []Step, state *
 			if !ok || wn.WindowConfig().Size == 0 {
 				errs[idx] = n.Execute(gCtx, state)
 			} else {
-				errs[idx] = executeWindowedNode(gCtx, n, wn.WindowConfig(), downstream, state, flowName, stateConfig)
+				errs[idx] = executeWindowedNode(gCtx, n, wn.WindowConfig(), downstream, state, flowName, stateConfig, hooks)
 			}
 			doneCh.Send(gCtx, idx)
 		})
@@ -306,7 +416,7 @@ func executeWindowed(ctx workflow.Context, step Step, downstream []Step, state *
 
 // executeWindowedNode runs a single windowed node in a loop, executing the
 // downstream pipeline for each batch.
-func executeWindowedNode(ctx workflow.Context, node ExecutableNode, windowCfg Window, downstream []Step, parentState *FlowState, flowName string, stateConfig *StateConfig) error {
+func executeWindowedNode(ctx workflow.Context, node ExecutableNode, windowCfg Window, downstream []Step, parentState *FlowState, flowName string, stateConfig *StateConfig, hooks *FlowHooks) error {
 	var windowCursor string
 
 	for batchNum := 0; ; batchNum++ {
@@ -326,15 +436,15 @@ func executeWindowedNode(ctx workflow.Context, node ExecutableNode, windowCfg Wi
 		var compensations []CompensationEntry
 		for _, step := range downstream {
 			if step.conditional != nil {
-				if err := executeConditional(ctx, step.conditional, batchState, flowName, &compensations); err != nil {
+				if err := executeConditional(ctx, step.conditional, batchState, flowName, &compensations, hooks); err != nil {
 					return fmt.Errorf("batch %d downstream %s: %w", batchNum, step.name, err)
 				}
 			} else if step.parallel {
-				if err := executeParallel(ctx, step, batchState, flowName, &compensations); err != nil {
+				if err := executeParallel(ctx, step, batchState, flowName, &compensations, hooks); err != nil {
 					return fmt.Errorf("batch %d downstream %s: %w", batchNum, step.name, err)
 				}
 			} else {
-				if err := executeSequential(ctx, step, batchState, flowName, &compensations); err != nil {
+				if err := executeSequential(ctx, step, batchState, flowName, &compensations, hooks); err != nil {
 					return fmt.Errorf("batch %d downstream %s: %w", batchNum, step.name, err)
 				}
 			}

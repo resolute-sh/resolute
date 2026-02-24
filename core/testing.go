@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 )
 
 // FlowTester provides a test harness for running flows without Temporal.
@@ -12,6 +13,8 @@ import (
 type FlowTester struct {
 	mu              sync.RWMutex
 	mocks           map[string]mockEntry
+	gateMocks       map[string]GateResult
+	childFlowMocks  map[string]func(*FlowState) (*FlowState, error)
 	callCounts      map[string]int
 	callArgs        map[string][]any
 	applyRateLimit  bool
@@ -27,9 +30,11 @@ type mockEntry struct {
 // NewFlowTester creates a new test harness.
 func NewFlowTester() *FlowTester {
 	return &FlowTester{
-		mocks:      make(map[string]mockEntry),
-		callCounts: make(map[string]int),
-		callArgs:   make(map[string][]any),
+		mocks:          make(map[string]mockEntry),
+		gateMocks:      make(map[string]GateResult),
+		childFlowMocks: make(map[string]func(*FlowState) (*FlowState, error)),
+		callCounts:     make(map[string]int),
+		callArgs:       make(map[string][]any),
 	}
 }
 
@@ -98,6 +103,24 @@ func (t *FlowTester) MockError(nodeName string, err error) *FlowTester {
 	return t
 }
 
+// MockGate registers a mock resolution for a gate by name.
+// When the tester encounters this gate, it immediately resolves with the given result.
+func (t *FlowTester) MockGate(gateName string, result GateResult) *FlowTester {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.gateMocks[gateName] = result
+	return t
+}
+
+// MockChildFlow registers a mock for a child flow node by name.
+// The function receives parent state and returns child state and error.
+func (t *FlowTester) MockChildFlow(name string, fn func(*FlowState) (*FlowState, error)) *FlowTester {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.childFlowMocks[name] = fn
+	return t
+}
+
 // Run executes the flow synchronously with mocked activities.
 // Returns the final FlowState and any error encountered.
 func (t *FlowTester) Run(flow *Flow, input FlowInput) (*FlowState, error) {
@@ -107,53 +130,153 @@ func (t *FlowTester) Run(flow *Flow, input FlowInput) (*FlowState, error) {
 // RunWithContext executes the flow with a context for cancellation support.
 func (t *FlowTester) RunWithContext(ctx context.Context, flow *Flow, input FlowInput) (*FlowState, error) {
 	state := NewFlowState(input)
+	hooks := flow.Hooks()
+
+	invokeBeforeFlow(hooks, flow.Name())
+	flowStart := time.Now()
 
 	for _, step := range flow.Steps() {
 		select {
 		case <-ctx.Done():
-			return state, ctx.Err()
+			err := ctx.Err()
+			invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), err)
+			return state, err
 		default:
 		}
 
-		if step.conditional != nil {
-			if err := t.executeConditionalStep(ctx, step.conditional, state); err != nil {
-				return state, err
-			}
+		var stepErr error
+		if step.gate != nil {
+			stepErr = t.executeGateStep(ctx, step, state, flow.Name(), hooks)
+		} else if step.children != nil {
+			stepErr = t.executeChildrenStep(ctx, step, state, flow.Name(), hooks)
+		} else if step.conditional != nil {
+			stepErr = t.executeConditionalStep(ctx, step.conditional, state, flow.Name(), hooks)
 		} else if step.parallel {
-			if err := t.executeParallelStep(ctx, step, state); err != nil {
-				return state, err
-			}
+			stepErr = t.executeParallelStep(ctx, step, state, flow.Name(), hooks)
 		} else {
-			if err := t.executeSequentialStep(ctx, step, state); err != nil {
-				return state, err
-			}
+			stepErr = t.executeSequentialStep(ctx, step, state, flow.Name(), hooks)
+		}
+		if stepErr != nil {
+			invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), stepErr)
+			return state, stepErr
 		}
 	}
 
+	invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), nil)
 	return state, nil
 }
 
-func (t *FlowTester) executeSequentialStep(ctx context.Context, step Step, state *FlowState) error {
-	for _, node := range step.nodes {
-		if err := t.executeNode(ctx, node, state); err != nil {
-			return err
-		}
+func (t *FlowTester) executeGateStep(_ context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	gate := step.gate
+
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	invokeBeforeNode(hooks, flowName, step.name, gate.Name())
+	nodeStart := time.Now()
+
+	t.mu.Lock()
+	t.callCounts[gate.Name()]++
+	t.mu.Unlock()
+
+	t.mu.RLock()
+	result, hasMock := t.gateMocks[gate.Name()]
+	t.mu.RUnlock()
+
+	if !hasMock {
+		err := fmt.Errorf("no gate mock registered for %q", gate.Name())
+		invokeAfterNode(hooks, flowName, step.name, gate.Name(), time.Since(nodeStart), err)
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+		return err
 	}
+
+	result.DecidedAt = time.Now()
+	state.SetResult(gate.OutputKey(), result)
+
+	invokeAfterNode(hooks, flowName, step.name, gate.Name(), time.Since(nodeStart), nil)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
 	return nil
 }
 
-func (t *FlowTester) executeParallelStep(ctx context.Context, step Step, state *FlowState) error {
-	// For testing, we execute "parallel" steps sequentially
-	// This is simpler and more deterministic for tests
-	for _, node := range step.nodes {
-		if err := t.executeNode(ctx, node, state); err != nil {
-			return err
+func (t *FlowTester) executeChildrenStep(_ context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	child := step.children
+
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	t.mu.Lock()
+	t.callCounts[child.Name()]++
+	t.mu.Unlock()
+
+	t.mu.RLock()
+	mockFn, hasMock := t.childFlowMocks[child.Name()]
+	t.mu.RUnlock()
+
+	if !hasMock {
+		err := fmt.Errorf("no child flow mock registered for %q", child.Name())
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+		return err
+	}
+
+	childState, err := mockFn(state)
+	if err != nil {
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+		return fmt.Errorf("child flow %s: %w", child.Name(), err)
+	}
+
+	if childState != nil {
+		for _, key := range Keys(childState) {
+			state.SetResult(key, childState.GetResult(key))
 		}
 	}
+
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
 	return nil
 }
 
-func (t *FlowTester) executeConditionalStep(ctx context.Context, config *ConditionalConfig, state *FlowState) error {
+func (t *FlowTester) executeSequentialStep(ctx context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	for _, node := range step.nodes {
+		invokeBeforeNode(hooks, flowName, step.name, node.Name())
+		nodeStart := time.Now()
+
+		err := t.executeNode(ctx, node, state)
+
+		invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err)
+		if err != nil {
+			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+			return err
+		}
+	}
+
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	return nil
+}
+
+func (t *FlowTester) executeParallelStep(ctx context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	for _, node := range step.nodes {
+		invokeBeforeNode(hooks, flowName, step.name, node.Name())
+		nodeStart := time.Now()
+
+		err := t.executeNode(ctx, node, state)
+
+		invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err)
+		if err != nil {
+			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+			return err
+		}
+	}
+
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	return nil
+}
+
+func (t *FlowTester) executeConditionalStep(ctx context.Context, config *ConditionalConfig, state *FlowState, flowName string, hooks *FlowHooks) error {
 	var stepsToExecute []Step
 	if config.predicate(state) {
 		stepsToExecute = config.thenSteps
@@ -169,15 +292,15 @@ func (t *FlowTester) executeConditionalStep(ctx context.Context, config *Conditi
 		}
 
 		if step.conditional != nil {
-			if err := t.executeConditionalStep(ctx, step.conditional, state); err != nil {
+			if err := t.executeConditionalStep(ctx, step.conditional, state, flowName, hooks); err != nil {
 				return err
 			}
 		} else if step.parallel {
-			if err := t.executeParallelStep(ctx, step, state); err != nil {
+			if err := t.executeParallelStep(ctx, step, state, flowName, hooks); err != nil {
 				return err
 			}
 		} else {
-			if err := t.executeSequentialStep(ctx, step, state); err != nil {
+			if err := t.executeSequentialStep(ctx, step, state, flowName, hooks); err != nil {
 				return err
 			}
 		}
@@ -335,6 +458,8 @@ func (t *FlowTester) ResetAll() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.mocks = make(map[string]mockEntry)
+	t.gateMocks = make(map[string]GateResult)
+	t.childFlowMocks = make(map[string]func(*FlowState) (*FlowState, error))
 	t.callCounts = make(map[string]int)
 	t.callArgs = make(map[string][]any)
 }
