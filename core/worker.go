@@ -48,7 +48,7 @@ func (c *WorkerConfig) Validate() error {
 // WorkerBuilder provides a fluent API for constructing and running a Temporal worker.
 type WorkerBuilder struct {
 	config          WorkerConfig
-	flow            *Flow
+	flows           []*Flow
 	providers       []Provider
 	client          client.Client
 	worker          worker.Worker
@@ -73,9 +73,10 @@ func (b *WorkerBuilder) WithConfig(cfg WorkerConfig) *WorkerBuilder {
 	return b
 }
 
-// WithFlow sets the flow to be executed by this worker.
+// WithFlow adds a flow to be registered with this worker.
+// Multiple flows can be registered by calling WithFlow multiple times.
 func (b *WorkerBuilder) WithFlow(f *Flow) *WorkerBuilder {
-	b.flow = f
+	b.flows = append(b.flows, f)
 	return b
 }
 
@@ -132,7 +133,11 @@ func (b *WorkerBuilder) WithMetrics(exporter MetricsExporter) *WorkerBuilder {
 
 // Build creates the Temporal client and worker without starting them.
 // This is useful for testing or custom lifecycle management.
+// Safe to call multiple times — subsequent calls are no-ops.
 func (b *WorkerBuilder) Build() error {
+	if b.worker != nil {
+		return nil
+	}
 	b.config.loadDefaults()
 
 	if err := b.config.Validate(); err != nil {
@@ -163,9 +168,9 @@ func (b *WorkerBuilder) Build() error {
 
 	b.worker = worker.New(c, b.config.TaskQueue, opts)
 
-	if b.flow != nil {
-		b.worker.RegisterWorkflowWithOptions(b.flow.Execute, workflow.RegisterOptions{
-			Name: b.flow.Name(),
+	for _, f := range b.flows {
+		b.worker.RegisterWorkflowWithOptions(f.Execute, workflow.RegisterOptions{
+			Name: f.Name(),
 		})
 	}
 
@@ -182,14 +187,16 @@ func (b *WorkerBuilder) Build() error {
 		return fmt.Errorf("setup schedule: %w", err)
 	}
 
-	if b.webhookAddr != "" && b.flow != nil {
+	if b.webhookAddr != "" && len(b.flows) > 0 {
 		b.webhookServer = NewWebhookServer(WebhookServerConfig{
 			Client:    b.client,
 			TaskQueue: b.config.TaskQueue,
 		})
-		if b.flow.Trigger() != nil && b.flow.Trigger().Type() == TriggerWebhook {
-			if err := b.webhookServer.RegisterFlow(b.flow); err != nil {
-				return fmt.Errorf("register webhook flow: %w", err)
+		for _, f := range b.flows {
+			if f.Trigger() != nil && f.Trigger().Type() == TriggerWebhook {
+				if err := b.webhookServer.RegisterFlow(f); err != nil {
+					return fmt.Errorf("register webhook flow %s: %w", f.Name(), err)
+				}
 			}
 		}
 	}
@@ -363,51 +370,54 @@ func (b *WorkerBuilder) runProviderHealthChecks() error {
 }
 
 func (b *WorkerBuilder) setupSchedule() error {
-	if b.flow == nil || b.flow.Trigger() == nil || b.flow.Trigger().Type() != TriggerSchedule {
-		return nil
+	for _, f := range b.flows {
+		if f.Trigger() == nil || f.Trigger().Type() != TriggerSchedule {
+			continue
+		}
+
+		cronExpr := f.Trigger().Config().CronSchedule
+		scheduleID := f.Name() + "-schedule"
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+		action := &client.ScheduleWorkflowAction{
+			ID:                       f.Name(),
+			Workflow:                 f.Name(),
+			TaskQueue:                b.config.TaskQueue,
+			WorkflowExecutionTimeout: 1 * time.Hour,
+		}
+
+		_, err := b.client.ScheduleClient().Create(ctx, client.ScheduleOptions{
+			ID:      scheduleID,
+			Spec:    client.ScheduleSpec{CronExpressions: []string{cronExpr}},
+			Action:  action,
+			Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
+		})
+		if err == nil {
+			log.Printf("Created schedule %s (cron: %s)", scheduleID, cronExpr)
+			cancel()
+			continue
+		}
+
+		handle := b.client.ScheduleClient().GetHandle(ctx, scheduleID)
+		updateErr := handle.Update(ctx, client.ScheduleUpdateOptions{
+			DoUpdate: func(input client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
+				input.Description.Schedule.Spec = &client.ScheduleSpec{
+					CronExpressions: []string{cronExpr},
+				}
+				input.Description.Schedule.Action = action
+				return &client.ScheduleUpdate{
+					Schedule: &input.Description.Schedule,
+				}, nil
+			},
+		})
+		cancel()
+		if updateErr != nil {
+			return fmt.Errorf("create schedule: %w; update schedule: %w", err, updateErr)
+		}
+
+		log.Printf("Updated schedule %s (cron: %s)", scheduleID, cronExpr)
 	}
-
-	cronExpr := b.flow.Trigger().Config().CronSchedule
-	scheduleID := b.flow.Name() + "-schedule"
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	action := &client.ScheduleWorkflowAction{
-		ID:                       b.flow.Name(),
-		Workflow:                 b.flow.Name(),
-		TaskQueue:                b.config.TaskQueue,
-		WorkflowExecutionTimeout: 1 * time.Hour,
-	}
-
-	_, err := b.client.ScheduleClient().Create(ctx, client.ScheduleOptions{
-		ID:      scheduleID,
-		Spec:    client.ScheduleSpec{CronExpressions: []string{cronExpr}},
-		Action:  action,
-		Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
-	})
-	if err == nil {
-		log.Printf("Created schedule %s (cron: %s)", scheduleID, cronExpr)
-		return nil
-	}
-
-	handle := b.client.ScheduleClient().GetHandle(ctx, scheduleID)
-	updateErr := handle.Update(ctx, client.ScheduleUpdateOptions{
-		DoUpdate: func(input client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
-			input.Description.Schedule.Spec = &client.ScheduleSpec{
-				CronExpressions: []string{cronExpr},
-			}
-			input.Description.Schedule.Action = action
-			return &client.ScheduleUpdate{
-				Schedule: &input.Description.Schedule,
-			}, nil
-		},
-	})
-	if updateErr != nil {
-		return fmt.Errorf("create schedule: %w; update schedule: %w", err, updateErr)
-	}
-
-	log.Printf("Updated schedule %s (cron: %s)", scheduleID, cronExpr)
 	return nil
 }
 

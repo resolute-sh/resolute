@@ -25,11 +25,19 @@ Resolute is a **Agent Orchestration as Code framework** for Go, built on [Tempor
 ## Features
 
 - **Type-Safe Flows** - Generic nodes with compile-time type checking
-- **Fluent Builder API** - Intuitive flow construction with `.Then()`, `.ThenParallel()`, `.When()`
-- **Built-in Patterns** - Saga compensation, pagination, rate limiting out of the box
-- **Provider Ecosystem** - Pre-built integrations for Jira, Confluence, Qdrant, Ollama, PagerDuty
+- **Fluent Builder API** - Intuitive flow construction with `.Then()`, `.ThenParallel()`, `.ThenGate()`, `.ThenChildren()`
+- **Built-in Patterns** - Saga compensation, pagination, rate limiting, approval gates out of the box
+- **Flow Hooks** - Lifecycle callbacks for observability, metrics, and LLM cost tracking
+- **Dynamic Templates** - Runtime flow construction with `FlowTemplate` for data-driven workflows
+- **Provider Ecosystem** - Pre-built integrations for Jira, Confluence, Qdrant, Ollama, PagerDuty, Bitbucket, Slack
 - **Easy Testing** - `FlowTester` for unit tests without Temporal infrastructure
 - **Production Ready** - Webhook triggers, state persistence, cursor-based incremental sync
+
+## Install
+
+```bash
+go get github.com/resolute-sh/resolute@v0.4.0-alpha
+```
 
 ## Getting Started & Documentation
 
@@ -91,6 +99,20 @@ func main() {
 | Ollama | `resolute-ollama` | Local LLM embeddings |
 | PagerDuty | `resolute-pagerduty` | Incident management |
 | Transform | `resolute-transform` | Document chunking and merging |
+| Bitbucket | `resolute-bitbucket` | Webhook parsing and PR comments |
+| Slack | `resolute-slack` | Channel messaging via webhooks |
+
+## What's New in v0.4.0-alpha
+
+- **Flow Hooks** — Lifecycle callbacks at flow, step, and node boundaries with LLM cost tracking
+- **Gate Nodes** — Pause flows until external signals arrive (approval workflows)
+- **Child Flows** — Spawn child workflows for fan-out processing
+- **Flow Templates** — Dynamic runtime flow construction
+- **InputData Marker** — Access webhook payloads from activity inputs
+- **Bitbucket Provider** — Webhook parsing and PR comment automation
+- **Slack Provider** — Channel messaging with Block Kit support
+
+See the [full release notes](https://resolute.sh/docs/releases/v0.4.0-alpha/).
 
 ## Contributing
 

@@ -305,6 +305,11 @@ func resolveCursorValue(val reflect.Value, state *FlowState) error {
 	return nil
 }
 
+// ResolveStringRef resolves a string that may contain output/input/cursor markers.
+func ResolveStringRef(s string, state *FlowState) (string, error) {
+	return resolveStringMarkers(s, state)
+}
+
 // resolveStringMarkers resolves output, cursor, and input string markers.
 func resolveStringMarkers(s string, state *FlowState) (string, error) {
 	if strings.HasPrefix(s, outputMarkerPrefix) && strings.HasSuffix(s, outputMarkerSuffix) {
