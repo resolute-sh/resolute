@@ -311,8 +311,14 @@ func ResolveStringRef(s string, state *FlowState) (string, error) {
 }
 
 // resolveStringMarkers resolves output, cursor, and input string markers.
+// Supports both whole-string markers ("{{input:key}}") and inline substitution
+// ("prefix {{input:key}} suffix").
 func resolveStringMarkers(s string, state *FlowState) (string, error) {
-	if strings.HasPrefix(s, outputMarkerPrefix) && strings.HasSuffix(s, outputMarkerSuffix) {
+	if !strings.Contains(s, "{{") {
+		return s, nil
+	}
+
+	if strings.HasPrefix(s, outputMarkerPrefix) && strings.HasSuffix(s, outputMarkerSuffix) && strings.Count(s, "{{") == 1 {
 		path := s[len(outputMarkerPrefix) : len(s)-len(outputMarkerSuffix)]
 		resolved, err := resolveOutputPath(path, state)
 		if err != nil {
@@ -321,13 +327,13 @@ func resolveStringMarkers(s string, state *FlowState) (string, error) {
 		return resolved, nil
 	}
 
-	if strings.HasPrefix(s, cursorMarkerPrefix) && strings.HasSuffix(s, cursorMarkerSuffix) {
+	if strings.HasPrefix(s, cursorMarkerPrefix) && strings.HasSuffix(s, cursorMarkerSuffix) && strings.Count(s, "{{") == 1 {
 		source := s[len(cursorMarkerPrefix) : len(s)-len(cursorMarkerSuffix)]
 		cursor := state.GetCursor(source)
 		return cursor.Position, nil
 	}
 
-	if strings.HasPrefix(s, inputMarkerPrefix) && strings.HasSuffix(s, inputMarkerSuffix) {
+	if strings.HasPrefix(s, inputMarkerPrefix) && strings.HasSuffix(s, inputMarkerSuffix) && strings.Count(s, "{{") == 1 {
 		key := s[len(inputMarkerPrefix) : len(s)-len(inputMarkerSuffix)]
 		data, ok := state.GetInputData(key)
 		if !ok {
@@ -336,7 +342,57 @@ func resolveStringMarkers(s string, state *FlowState) (string, error) {
 		return string(data), nil
 	}
 
-	return s, nil
+	return resolveInlineMarkers(s, state)
+}
+
+// resolveInlineMarkers replaces all {{input:key}} and {{output:path}} markers
+// within a larger string. Unknown markers are left as-is.
+func resolveInlineMarkers(s string, state *FlowState) (string, error) {
+	var result strings.Builder
+	remaining := s
+
+	for {
+		start := strings.Index(remaining, "{{")
+		if start == -1 {
+			result.WriteString(remaining)
+			break
+		}
+
+		end := strings.Index(remaining[start:], "}}")
+		if end == -1 {
+			result.WriteString(remaining)
+			break
+		}
+		end += start + 2
+
+		result.WriteString(remaining[:start])
+		marker := remaining[start:end]
+		remaining = remaining[end:]
+
+		inner := marker[2 : len(marker)-2]
+
+		if strings.HasPrefix(inner, "input:") {
+			key := inner[6:]
+			data, ok := state.GetInputData(key)
+			if ok {
+				result.Write(data)
+			} else {
+				result.WriteString(marker)
+			}
+		} else if strings.HasPrefix(inner, "output:") {
+			path := inner[7:]
+			resolved, err := resolveOutputPath(path, state)
+			if err == nil {
+				result.WriteString(resolved)
+			} else {
+				result.WriteString(marker)
+			}
+		} else {
+			result.WriteString(marker)
+		}
+	}
+
+	return result.String(), nil
 }
 
 // resolveOutputPath resolves a path like "vpc" or "vpc.name" to the actual value.
