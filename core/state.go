@@ -53,6 +53,18 @@ func (s *FlowState) GetInputData(key string) ([]byte, bool) {
 	return data, ok
 }
 
+// SetInputData stores raw input data by key. Nodes can call this to inject
+// context (e.g. previous agent responses) that downstream template markers
+// like {{input:key}} can resolve against.
+func (s *FlowState) SetInputData(key string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.input == nil {
+		s.input = make(map[string][]byte)
+	}
+	s.input[key] = data
+}
+
 // GetResult retrieves a raw result by key. Returns any because activity result
 // types vary; prefer typed Get[T]() for compile-time type safety.
 func (s *FlowState) GetResult(key string) any {
