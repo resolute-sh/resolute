@@ -375,7 +375,8 @@ func (b *WorkerBuilder) setupSchedule() error {
 			continue
 		}
 
-		cronExpr := f.Trigger().Config().CronSchedule
+		triggerCfg := f.Trigger().Config()
+		cronExpr := triggerCfg.CronSchedule
 		scheduleID := f.Name() + "-schedule"
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -387,14 +388,19 @@ func (b *WorkerBuilder) setupSchedule() error {
 			WorkflowExecutionTimeout: 1 * time.Hour,
 		}
 
+		spec := client.ScheduleSpec{CronExpressions: []string{cronExpr}}
+		if triggerCfg.Timezone != "" {
+			spec.TimeZoneName = triggerCfg.Timezone
+		}
+
 		_, err := b.client.ScheduleClient().Create(ctx, client.ScheduleOptions{
 			ID:      scheduleID,
-			Spec:    client.ScheduleSpec{CronExpressions: []string{cronExpr}},
+			Spec:    spec,
 			Action:  action,
 			Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
 		})
 		if err == nil {
-			log.Printf("Created schedule %s (cron: %s)", scheduleID, cronExpr)
+			log.Printf("Created schedule %s (cron: %s, tz: %s)", scheduleID, cronExpr, triggerCfg.Timezone)
 			cancel()
 			continue
 		}
@@ -402,9 +408,7 @@ func (b *WorkerBuilder) setupSchedule() error {
 		handle := b.client.ScheduleClient().GetHandle(ctx, scheduleID)
 		updateErr := handle.Update(ctx, client.ScheduleUpdateOptions{
 			DoUpdate: func(input client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
-				input.Description.Schedule.Spec = &client.ScheduleSpec{
-					CronExpressions: []string{cronExpr},
-				}
+				input.Description.Schedule.Spec = &spec
 				input.Description.Schedule.Action = action
 				return &client.ScheduleUpdate{
 					Schedule: &input.Description.Schedule,
@@ -416,7 +420,7 @@ func (b *WorkerBuilder) setupSchedule() error {
 			return fmt.Errorf("create schedule: %w; update schedule: %w", err, updateErr)
 		}
 
-		log.Printf("Updated schedule %s (cron: %s)", scheduleID, cronExpr)
+		log.Printf("Updated schedule %s (cron: %s, tz: %s)", scheduleID, cronExpr, triggerCfg.Timezone)
 	}
 	return nil
 }

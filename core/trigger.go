@@ -31,6 +31,10 @@ type TriggerConfig struct {
 	// CronSchedule is the cron expression for scheduled triggers.
 	CronSchedule string
 
+	// Timezone is the IANA time zone name for scheduled triggers (e.g. "America/Los_Angeles").
+	// Maps to Temporal's ScheduleSpec.TimeZoneName. Empty defaults to UTC.
+	Timezone string
+
 	// SignalName is the Temporal signal name for signal triggers.
 	SignalName string
 
@@ -71,7 +75,8 @@ func Manual(id string) Trigger {
 
 // scheduleTrigger implements Trigger for cron-scheduled flows.
 type scheduleTrigger struct {
-	cron string
+	cron     string
+	timezone string
 }
 
 func (t *scheduleTrigger) Type() TriggerType {
@@ -79,20 +84,35 @@ func (t *scheduleTrigger) Type() TriggerType {
 }
 
 func (t *scheduleTrigger) Config() TriggerConfig {
-	return TriggerConfig{CronSchedule: t.cron}
+	return TriggerConfig{CronSchedule: t.cron, Timezone: t.timezone}
 }
 
 // Schedule creates a trigger for cron-scheduled flow execution.
 // Uses standard cron expression format (minute hour day month weekday).
+// Defaults to UTC. Use ScheduleWithTimezone for timezone-aware scheduling.
 //
 // Example:
 //
 //	flow := core.NewFlow("daily-sync").
-//	    TriggeredBy(core.Schedule("0 2 * * *")).  // Daily at 2 AM
+//	    TriggeredBy(core.Schedule("0 2 * * *")).  // Daily at 2 AM UTC
 //	    Then(syncNode).
 //	    Build()
 func Schedule(cron string) Trigger {
 	return &scheduleTrigger{cron: cron}
+}
+
+// ScheduleWithTimezone creates a trigger for cron-scheduled flow execution
+// with an explicit IANA timezone (e.g. "America/Los_Angeles").
+// The timezone maps to Temporal's ScheduleSpec.TimeZoneName.
+//
+// Example:
+//
+//	flow := core.NewFlow("morning-sync").
+//	    TriggeredBy(core.ScheduleWithTimezone("0 6 * * 1-5", "America/Los_Angeles")).
+//	    Then(syncNode).
+//	    Build()
+func ScheduleWithTimezone(cron, timezone string) Trigger {
+	return &scheduleTrigger{cron: cron, timezone: timezone}
 }
 
 // signalTrigger implements Trigger for signal-initiated flows.
