@@ -21,12 +21,14 @@ type Flow struct {
 // A step can contain one node (sequential), multiple nodes (parallel),
 // a conditional branch, a gate, or child workflows.
 type Step struct {
-	name        string
-	nodes       []ExecutableNode
-	parallel    bool
-	conditional *ConditionalConfig
-	gate        *GateNode
-	children    *ChildFlowNode
+	name         string
+	nodes        []ExecutableNode
+	parallel     bool
+	conditional  *ConditionalConfig
+	gate         *GateNode
+	children     *ChildFlowNode
+	loop         *loopStep
+	parallelEach *parallelEachStep
 }
 
 // FlowBuilder provides a fluent API for constructing flows.
@@ -233,6 +235,14 @@ func (f *Flow) executeInternal(ctx workflow.Context, input FlowInput) error {
 			if err := executeParallel(ctx, step, state, f.name, &compensations, f.hooks); err != nil {
 				return runCompensations(ctx, compensations, state, err)
 			}
+		} else if step.loop != nil {
+			if err := executeLoopStep(ctx, step, state, f.name, f.hooks); err != nil {
+				return runCompensations(ctx, compensations, state, err)
+			}
+		} else if step.parallelEach != nil {
+			if err := executeParallelEachStep(ctx, step, state, f.name, f.hooks); err != nil {
+				return runCompensations(ctx, compensations, state, err)
+			}
 		} else {
 			if err := executeSequential(ctx, step, state, f.name, &compensations, f.hooks); err != nil {
 				return runCompensations(ctx, compensations, state, err)
@@ -270,6 +280,31 @@ func executeChildrenStep(ctx workflow.Context, step Step, state *FlowState, flow
 	stepStart := time.Now()
 
 	err := step.children.Execute(ctx, state)
+
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+	return err
+}
+
+// executeLoopStep runs a Loop step, invoking step hooks before/after. The
+// returned LoopExitReason is currently discarded; future work emits it via
+// the Sink (see Plan A §12 deferred items).
+func executeLoopStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	_, err := step.loop.runner.runLoop(ctx, state)
+
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+	return err
+}
+
+// executeParallelEachStep runs a ParallelEach step, invoking step hooks
+// before/after. Errors from the runner propagate up.
+func executeParallelEachStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
+	invokeBeforeStep(hooks, flowName, step.name)
+	stepStart := time.Now()
+
+	err := step.parallelEach.runner.runParallelEach(ctx, state)
 
 	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
 	return err
