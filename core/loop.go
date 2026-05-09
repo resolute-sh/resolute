@@ -11,6 +11,12 @@ type LoopBody[S any] interface {
 	Execute(ctx workflow.Context, in S) (S, error)
 }
 
+// LoopBodyWithState is a LoopBody that also receives *FlowState.
+type LoopBodyWithState[S any] interface {
+	LoopBody[S]
+	ExecuteWithState(ctx workflow.Context, state S, fs *FlowState) (S, error)
+}
+
 // LoopOption configures a Loop. Apply options via the Loop or ThenLoop
 // constructors.
 type LoopOption[S any] func(*loopConfig[S])
@@ -51,7 +57,13 @@ func (r *typedLoopRunner[S]) runLoop(ctx workflow.Context, fs *FlowState) (LoopE
 			r.cfg.iterHook(IterationEvent{Phase: "started", N: i + 1})
 		}
 
-		next, err := r.cfg.body.Execute(ctx, state)
+		var next S
+		var err error
+		if bodyWS, ok := r.cfg.body.(LoopBodyWithState[S]); ok {
+			next, err = bodyWS.ExecuteWithState(ctx, state, fs)
+		} else {
+			next, err = r.cfg.body.Execute(ctx, state)
+		}
 		if err != nil {
 			r.cfg.finalToFS(fs, state)
 			return reason, err
@@ -127,6 +139,11 @@ func ThenLoop[S any](b *FlowBuilder, name string, opts ...LoopOption[S]) *FlowBu
 // the next S; iteration continues until While returns false or MaxIterations
 // is reached.
 func Body[S any](b LoopBody[S]) LoopOption[S] {
+	return func(c *loopConfig[S]) { c.body = b }
+}
+
+// BodyWithState sets a loop body that receives both S and *FlowState.
+func BodyWithState[S any](b LoopBodyWithState[S]) LoopOption[S] {
 	return func(c *loopConfig[S]) { c.body = b }
 }
 

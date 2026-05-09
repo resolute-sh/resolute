@@ -160,6 +160,58 @@ func TestTypedLoopRunner_HappyPath(t *testing.T) {
 // TestTypedLoopRunner_IterationHook verifies the IterationHook callback fires
 // twice per iteration ("started" before the body, "completed" after) with
 // monotonically increasing N starting at 1.
+func TestLoop_BodyWithState(t *testing.T) {
+	ts := &testsuite.WorkflowTestSuite{}
+	env := ts.NewTestWorkflowEnvironment()
+
+	var capturedFS *FlowState
+	wf := func(ctx workflow.Context) error {
+		b := NewFlow("loop-ws-test").TriggeredBy(Manual("test"))
+		ThenLoop[counterState](b, "loop-step",
+			BodyWithState[counterState](&counterBodyWithState{
+				fn: func(s counterState, fs *FlowState) counterState {
+					capturedFS = fs
+					s.N++
+					return s
+				},
+			}),
+			While[counterState](func(s counterState) bool { return s.N < 3 }),
+			MaxIterations[counterState](100),
+			InitialState[counterState](func(_ *FlowState) counterState {
+				return counterState{N: 0}
+			}),
+			FinalState[counterState](func(_ *FlowState, s counterState) {}),
+		)
+		flow := b.Build()
+		return flow.Execute(ctx, FlowInput{})
+	}
+
+	env.RegisterWorkflow(wf)
+	env.ExecuteWorkflow(wf)
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("workflow not completed")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	if capturedFS == nil {
+		t.Fatal("FlowState was not passed to loop body")
+	}
+}
+
+type counterBodyWithState struct {
+	fn func(counterState, *FlowState) counterState
+}
+
+func (b *counterBodyWithState) Execute(_ workflow.Context, s counterState) (counterState, error) {
+	return s, nil
+}
+
+func (b *counterBodyWithState) ExecuteWithState(_ workflow.Context, s counterState, fs *FlowState) (counterState, error) {
+	return b.fn(s, fs), nil
+}
+
 func TestTypedLoopRunner_IterationHook(t *testing.T) {
 	ts := &testsuite.WorkflowTestSuite{}
 	env := ts.NewTestWorkflowEnvironment()
