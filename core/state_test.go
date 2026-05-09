@@ -248,3 +248,59 @@ func TestSet(t *testing.T) {
 		}
 	})
 }
+
+func TestFlowState_Signals(t *testing.T) {
+	t.Parallel()
+
+	t.Run("new state has empty signal buffer", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+
+		if state.Signals() == nil {
+			t.Error("NewFlowState() should initialize Signals")
+		}
+		if state.Signals().Len("steer") != 0 {
+			t.Error("Signals should start empty")
+		}
+	})
+
+	t.Run("signals can be injected and taken", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+
+		state.Signals().Inject("steer", "msg1")
+		if state.Signals().Len("steer") != 1 {
+			t.Errorf("Len() = %d, want 1", state.Signals().Len("steer"))
+		}
+
+		val, ok := state.Signals().Take("steer")
+		if !ok {
+			t.Error("Take() should return true")
+		}
+		if val != "msg1" {
+			t.Errorf("Take() = %v, want %q", val, "msg1")
+		}
+	})
+
+	t.Run("snapshot has fresh empty buffer", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+		state.Signals().Inject("steer", "x")
+
+		snapshot := state.Snapshot()
+		if snapshot.Signals().Len("steer") != 0 {
+			t.Error("Snapshot should have empty signal buffer")
+		}
+	})
+
+	t.Run("batch state has fresh empty buffer", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+		state.Signals().Inject("steer", "x")
+
+		batch := state.NewBatchState()
+		if batch.Signals().Len("steer") != 0 {
+			t.Error("NewBatchState should have empty signal buffer")
+		}
+	})
+}

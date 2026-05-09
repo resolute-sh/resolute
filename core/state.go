@@ -17,7 +17,8 @@ type WindowMeta struct {
 }
 
 // FlowState carries data through workflow execution.
-// It holds input data, activity outputs, and cursor state for incremental processing.
+// It holds input data, activity outputs, cursor state, and buffered signals
+// for incremental processing.
 type FlowState struct {
 	mu      sync.RWMutex
 	input   map[string][]byte // Serialized initial input
@@ -26,6 +27,7 @@ type FlowState struct {
 	results    map[string]any
 	cursors    map[string]Cursor // Loaded from persisted state
 	windowMeta *WindowMeta       // Ephemeral, set by windowed executor per batch
+	signals    *SignalBuffer     // Buffered signals for non-blocking consumption
 }
 
 // Cursor tracks incremental processing position for a data source.
@@ -41,6 +43,7 @@ func NewFlowState(input FlowInput) *FlowState {
 		input:   input.Data,
 		results: make(map[string]any),
 		cursors: make(map[string]Cursor),
+		signals: NewSignalBuffer(),
 	}
 }
 
@@ -119,8 +122,15 @@ func (s *FlowState) GetWindowMeta() WindowMeta {
 	return *s.windowMeta
 }
 
+// Signals returns the signal buffer for non-blocking signal polling.
+func (s *FlowState) Signals() *SignalBuffer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.signals
+}
+
 // NewBatchState creates an isolated state for a windowed batch.
-// Inherits input and cursors from parent. Results and window meta start empty.
+// Inherits input and cursors from parent. Results, window meta, and signals start empty.
 func (s *FlowState) NewBatchState() *FlowState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -129,6 +139,7 @@ func (s *FlowState) NewBatchState() *FlowState {
 		input:   s.input,
 		results: make(map[string]any),
 		cursors: make(map[string]Cursor),
+		signals: NewSignalBuffer(),
 	}
 	for k, v := range s.cursors {
 		batch.cursors[k] = v
@@ -145,6 +156,7 @@ func (s *FlowState) Snapshot() *FlowState {
 		input:   make(map[string][]byte),
 		results: make(map[string]any),
 		cursors: make(map[string]Cursor),
+		signals: NewSignalBuffer(),
 	}
 
 	for k, v := range s.input {
