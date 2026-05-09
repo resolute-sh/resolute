@@ -474,3 +474,60 @@ func TestFlowHooks_AfterNodeReceivesFlowStateReader(t *testing.T) {
 		t.Fatalf("FlowStateReader.Get returned %d, want 99", got.Value)
 	}
 }
+
+// TestFlowHooks_CostExtractionViaAfterNode demonstrates the canonical pattern
+// for cost tracking: an AfterNode closure reads the node's output via
+// FlowStateReader, builds a CostEntry, and forwards to a user-supplied sink.
+// Plan B's resoluteagent.CostTrackingHook is built on this exact pattern.
+func TestFlowHooks_CostExtractionViaAfterNode(t *testing.T) {
+	type llmOutput struct {
+		Tokens int
+		Model  string
+	}
+
+	var collected []CostEntry
+
+	hooks := &FlowHooks{
+		AfterNode: func(hc HookContext, fs FlowStateReader) {
+			if hc.Error != nil {
+				return
+			}
+			out, err := GetSafe[llmOutput](fs, hc.NodeName)
+			if err != nil {
+				return // not the kind of node we care about
+			}
+			collected = append(collected, CostEntry{
+				NodeName:  hc.NodeName,
+				Model:     out.Model,
+				TokensOut: out.Tokens,
+				Duration:  hc.Duration,
+			})
+		},
+	}
+
+	node := NewNode("llm-call", func(ctx context.Context, in struct{}) (llmOutput, error) {
+		return llmOutput{Tokens: 123, Model: "gpt-4o-mini"}, nil
+	}, struct{}{})
+
+	flow := NewFlow("cost-flow").
+		TriggeredBy(Manual("test")).
+		WithHooks(hooks).
+		Then(node).
+		Build()
+
+	tester := NewFlowTester().MockValue("llm-call", llmOutput{Tokens: 123, Model: "gpt-4o-mini"})
+
+	if _, err := tester.Run(flow, FlowInput{}); err != nil {
+		t.Fatalf("flow run failed: %v", err)
+	}
+
+	if len(collected) != 1 {
+		t.Fatalf("got %d cost entries, want 1", len(collected))
+	}
+	if collected[0].TokensOut != 123 {
+		t.Fatalf("TokensOut = %d, want 123", collected[0].TokensOut)
+	}
+	if collected[0].Model != "gpt-4o-mini" {
+		t.Fatalf("Model = %q, want %q", collected[0].Model, "gpt-4o-mini")
+	}
+}
