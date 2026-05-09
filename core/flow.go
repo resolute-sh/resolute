@@ -358,7 +358,7 @@ func executeParallelEachStep(ctx workflow.Context, step Step, state *FlowState, 
 	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
-	err := step.parallelEach.runner.runParallelEach(ctx, state)
+	err := step.parallelEach.runner.runParallelEach(ctx, state, step.name)
 
 	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 	return err

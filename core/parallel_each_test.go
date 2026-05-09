@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,7 +86,7 @@ func TestTypedParallelEachRunner_BasicShapes(t *testing.T) {
 						onItemError: ItemErrorContinue,
 					},
 				}
-				if err := runner.runParallelEach(ctx, fs); err != nil {
+				if err := runner.runParallelEach(ctx, fs, "test-step"); err != nil {
 					return err
 				}
 				got = Get[[]string](fs, flowStateKeyResults)
@@ -149,7 +150,7 @@ func TestTypedParallelEachRunner_MaxConcurrency(t *testing.T) {
 				onItemError:    ItemErrorContinue,
 			},
 		}
-		return runner.runParallelEach(ctx, fs)
+		return runner.runParallelEach(ctx, fs, "test-step")
 	}
 
 	env.RegisterWorkflow(wf)
@@ -231,7 +232,7 @@ func TestTypedParallelEachRunner_OnItemError(t *testing.T) {
 						onItemError: tt.mode,
 					},
 				}
-				runErr = runner.runParallelEach(ctx, fs)
+				runErr = runner.runParallelEach(ctx, fs, "test-step")
 				got = GetOr[[]string](fs, flowStateKeyResults, nil)
 				return nil
 			}
@@ -320,7 +321,7 @@ func TestTypedParallelEachRunner_Cancellation(t *testing.T) {
 				onItemError:    ItemErrorContinue,
 			},
 		}
-		_ = runner.runParallelEach(cancelCtx, fs)
+		_ = runner.runParallelEach(cancelCtx, fs, "test-step")
 		return nil
 	}
 
@@ -338,4 +339,83 @@ func TestTypedParallelEachRunner_Cancellation(t *testing.T) {
 	if c >= 10 {
 		t.Errorf("completed = %d (all 10), expected cancellation to interrupt some items", c)
 	}
+}
+
+func TestParallelEach_PerItemHooksFireWithTypedArgs(t *testing.T) {
+	type itemT struct{ N int }
+	type resultT struct{ Doubled int }
+
+	var (
+		mu          sync.Mutex
+		beforeItems []itemT
+		afterPairs  []struct {
+			Item itemT
+			Out  resultT
+			Err  error
+		}
+	)
+
+	body := &itemActivityFn[itemT, resultT]{fn: func(_ workflow.Context, in itemT) (resultT, error) {
+		return resultT{Doubled: in.N * 2}, nil
+	}}
+
+	cfg := &parallelEachConfig[itemT, resultT]{
+		from: func(_ *FlowState) []itemT { return []itemT{{N: 1}, {N: 2}, {N: 3}} },
+		body: body,
+		merge: func(fs *FlowState, results []resultT) {
+			Set(fs, "doubled", results)
+		},
+		onItemError: ItemErrorContinue,
+		beforeItem: func(_ ItemContext, it itemT, _ FlowStateReader) {
+			mu.Lock()
+			beforeItems = append(beforeItems, it)
+			mu.Unlock()
+		},
+		afterItem: func(_ ItemContext, it itemT, out resultT, err error, _ FlowStateReader) {
+			mu.Lock()
+			afterPairs = append(afterPairs, struct {
+				Item itemT
+				Out  resultT
+				Err  error
+			}{it, out, err})
+			mu.Unlock()
+		},
+	}
+	runner := &typedParallelEachRunner[itemT, resultT]{cfg: cfg}
+
+	ts := &testsuite.WorkflowTestSuite{}
+	env := ts.NewTestWorkflowEnvironment()
+	wf := func(ctx workflow.Context) error {
+		fs := NewFlowState(FlowInput{})
+		return runner.runParallelEach(ctx, fs, "doubler-step")
+	}
+	env.RegisterWorkflow(wf)
+	env.ExecuteWorkflow(wf)
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+
+	if len(beforeItems) != 3 {
+		t.Fatalf("BeforeItem fired %d times, want 3", len(beforeItems))
+	}
+	if len(afterPairs) != 3 {
+		t.Fatalf("AfterItem fired %d times, want 3", len(afterPairs))
+	}
+	for _, pair := range afterPairs {
+		if pair.Out.Doubled != pair.Item.N*2 {
+			t.Fatalf("AfterItem saw Doubled=%d for N=%d, want %d", pair.Out.Doubled, pair.Item.N, pair.Item.N*2)
+		}
+		if pair.Err != nil {
+			t.Fatalf("unexpected per-item error: %v", pair.Err)
+		}
+	}
+}
+
+// itemActivityFn adapts a closure into an ItemActivity[I, O] for tests.
+type itemActivityFn[I, O any] struct {
+	fn func(workflow.Context, I) (O, error)
+}
+
+func (f *itemActivityFn[I, O]) Execute(ctx workflow.Context, in I) (O, error) {
+	return f.fn(ctx, in)
 }

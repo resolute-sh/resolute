@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"time"
 
 	"go.temporal.io/sdk/workflow"
 )
@@ -23,13 +24,16 @@ type parallelEachConfig[I, O any] struct {
 	maxConcurrency int
 	onItemError    ItemErrorMode
 	perItemRetry   *RetryPolicyOverride
+	beforeItem     func(ItemContext, I, FlowStateReader)
+	afterItem      func(ItemContext, I, O, error, FlowStateReader)
 }
 
 // parallelEachRunner is the unexported Step-level seam. Implementations are
 // typed (typedParallelEachRunner[I, O]) so the Step holds an interface, not
-// an `any` field.
+// an `any` field. The stepName parameter is used to populate ItemContext
+// for per-item hooks.
 type parallelEachRunner interface {
-	runParallelEach(ctx workflow.Context, fs *FlowState) error
+	runParallelEach(ctx workflow.Context, fs *FlowState, stepName string) error
 }
 
 // typedParallelEachRunner is the concrete generic implementation behind
@@ -40,7 +44,7 @@ type typedParallelEachRunner[I, O any] struct {
 	cfg *parallelEachConfig[I, O]
 }
 
-func (r *typedParallelEachRunner[I, O]) runParallelEach(ctx workflow.Context, fs *FlowState) error {
+func (r *typedParallelEachRunner[I, O]) runParallelEach(ctx workflow.Context, fs *FlowState, stepName string) error {
 	if r.cfg.from == nil {
 		return fmt.Errorf("flow.ParallelEach: from option is required")
 	}
@@ -99,9 +103,20 @@ func (r *typedParallelEachRunner[I, O]) runParallelEach(ctx workflow.Context, fs
 				return
 			}
 
+			itemCtx := ItemContext{StepName: stepName, Index: idx}
+			if r.cfg.beforeItem != nil {
+				r.cfg.beforeItem(itemCtx, items[idx], fs)
+			}
+			itemStart := workflow.Now(gCtx)
+
 			out, err := r.cfg.body.Execute(gCtx, items[idx])
 			results[idx] = out
 			errs[idx] = err
+
+			if r.cfg.afterItem != nil {
+				itemCtx.Duration = workflow.Now(gCtx).Sub(itemStart)
+				r.cfg.afterItem(itemCtx, items[idx], out, err, fs)
+			}
 
 			if err != nil && r.cfg.onItemError == ItemErrorFailFast && !failFastTriggered {
 				failFastTriggered = true
@@ -215,6 +230,30 @@ func PerItemRetry[I, O any](p RetryPolicyOverride) ParallelEachOption[I, O] {
 // OnItemError controls failed-item handling. Default ItemErrorContinue.
 func OnItemError[I, O any](m ItemErrorMode) ParallelEachOption[I, O] {
 	return func(c *parallelEachConfig[I, O]) { c.onItemError = m }
+}
+
+// ItemContext carries structured context about a per-item execution within
+// a ParallelEach step.
+type ItemContext struct {
+	StepName string
+	Index    int
+	Duration time.Duration // populated in AfterItem only
+}
+
+// BeforeItem installs an observability callback fired once per item, immediately
+// before the item activity starts. Receives the typed item I and a read-only
+// FlowStateReader. Runs in workflow code; must be deterministic.
+func BeforeItem[I, O any](fn func(ItemContext, I, FlowStateReader)) ParallelEachOption[I, O] {
+	return func(c *parallelEachConfig[I, O]) { c.beforeItem = fn }
+}
+
+// AfterItem installs an observability callback fired once per item, immediately
+// after the item activity completes (whether success or error). Receives the
+// typed item I, the typed output O (zero-value on error), the activity error
+// (nil on success), and a read-only FlowStateReader. Runs in workflow code;
+// must be deterministic.
+func AfterItem[I, O any](fn func(ItemContext, I, O, error, FlowStateReader)) ParallelEachOption[I, O] {
+	return func(c *parallelEachConfig[I, O]) { c.afterItem = fn }
 }
 
 // ItemErrorMode controls how ParallelEach handles per-item failures.
