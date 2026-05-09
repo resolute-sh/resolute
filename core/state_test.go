@@ -249,6 +249,71 @@ func TestSet(t *testing.T) {
 	})
 }
 
+func TestFlowState_ChildWorkflows(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty state has no children", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+
+		_, ok := state.ChildWorkflowID("agent")
+		if ok {
+			t.Error("ChildWorkflowID should return false for empty state")
+		}
+
+		all := state.ChildWorkflows()
+		if len(all) != 0 {
+			t.Errorf("ChildWorkflows() = %v, want empty", all)
+		}
+	})
+
+	t.Run("register and retrieve child workflow", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+
+		state.RegisterChildWorkflow("agent", "child-123")
+		id, ok := state.ChildWorkflowID("agent")
+		if !ok {
+			t.Error("ChildWorkflowID should return true after registration")
+		}
+		if id != "child-123" {
+			t.Errorf("ChildWorkflowID = %q, want %q", id, "child-123")
+		}
+
+		all := state.ChildWorkflows()
+		if len(all) != 1 {
+			t.Errorf("ChildWorkflows() len = %d, want 1", len(all))
+		}
+		if all["agent"] != "child-123" {
+			t.Errorf("ChildWorkflows()[agent] = %q, want %q", all["agent"], "child-123")
+		}
+	})
+
+	t.Run("snapshot copies child workflows", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+		state.RegisterChildWorkflow("agent", "child-123")
+
+		snapshot := state.Snapshot()
+		id, ok := snapshot.ChildWorkflowID("agent")
+		if !ok || id != "child-123" {
+			t.Error("Snapshot should copy childWorkflows")
+		}
+	})
+
+	t.Run("batch state has empty child workflows", func(t *testing.T) {
+		t.Parallel()
+		state := NewFlowState(FlowInput{})
+		state.RegisterChildWorkflow("agent", "child-123")
+
+		batch := state.NewBatchState()
+		_, ok := batch.ChildWorkflowID("agent")
+		if ok {
+			t.Error("NewBatchState should have empty childWorkflows")
+		}
+	})
+}
+
 func TestFlowState_Signals(t *testing.T) {
 	t.Parallel()
 

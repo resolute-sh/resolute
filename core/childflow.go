@@ -81,6 +81,7 @@ func (c *ChildFlowNode) executeParallel(ctx workflow.Context, state *FlowState, 
 
 	for i, input := range inputs {
 		childID := fmt.Sprintf("%s-child-%d", c.name, i)
+		state.RegisterChildWorkflow(fmt.Sprintf("%s-%d", c.name, i), childID)
 		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 			WorkflowID: childID,
 		})
@@ -113,6 +114,7 @@ func (c *ChildFlowNode) executeSequential(ctx workflow.Context, state *FlowState
 
 	for i, input := range inputs {
 		childID := fmt.Sprintf("%s-child-%d", c.name, i)
+		state.RegisterChildWorkflow(fmt.Sprintf("%s-%d", c.name, i), childID)
 		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 			WorkflowID: childID,
 		})

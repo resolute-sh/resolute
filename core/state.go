@@ -24,10 +24,11 @@ type FlowState struct {
 	input   map[string][]byte // Serialized initial input
 	// results holds activity outputs. Untyped storage required because activities
 	// return heterogeneous types; type safety restored via Get[T]() accessor.
-	results    map[string]any
-	cursors    map[string]Cursor // Loaded from persisted state
-	windowMeta *WindowMeta       // Ephemeral, set by windowed executor per batch
-	signals    *SignalBuffer     // Buffered signals for non-blocking consumption
+	results        map[string]any
+	cursors        map[string]Cursor // Loaded from persisted state
+	windowMeta     *WindowMeta       // Ephemeral, set by windowed executor per batch
+	signals        *SignalBuffer     // Buffered signals for non-blocking consumption
+	childWorkflows map[string]string // nodeName -> childWorkflowID
 }
 
 // Cursor tracks incremental processing position for a data source.
@@ -136,10 +137,11 @@ func (s *FlowState) NewBatchState() *FlowState {
 	defer s.mu.RUnlock()
 
 	batch := &FlowState{
-		input:   s.input,
-		results: make(map[string]any),
-		cursors: make(map[string]Cursor),
-		signals: NewSignalBuffer(),
+		input:          s.input,
+		results:        make(map[string]any),
+		cursors:        make(map[string]Cursor),
+		signals:        NewSignalBuffer(),
+		childWorkflows: make(map[string]string),
 	}
 	for k, v := range s.cursors {
 		batch.cursors[k] = v
@@ -153,10 +155,11 @@ func (s *FlowState) Snapshot() *FlowState {
 	defer s.mu.RUnlock()
 
 	snapshot := &FlowState{
-		input:   make(map[string][]byte),
-		results: make(map[string]any),
-		cursors: make(map[string]Cursor),
-		signals: NewSignalBuffer(),
+		input:          make(map[string][]byte),
+		results:        make(map[string]any),
+		cursors:        make(map[string]Cursor),
+		signals:        NewSignalBuffer(),
+		childWorkflows: make(map[string]string),
 	}
 
 	for k, v := range s.input {
@@ -167,6 +170,9 @@ func (s *FlowState) Snapshot() *FlowState {
 	}
 	for k, v := range s.cursors {
 		snapshot.cursors[k] = v
+	}
+	for k, v := range s.childWorkflows {
+		snapshot.childWorkflows[k] = v
 	}
 
 	return snapshot
@@ -343,6 +349,35 @@ func Keys(s *FlowState) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// RegisterChildWorkflow records a child workflow ID for a node.
+func (s *FlowState) RegisterChildWorkflow(nodeName, workflowID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.childWorkflows == nil {
+		s.childWorkflows = make(map[string]string)
+	}
+	s.childWorkflows[nodeName] = workflowID
+}
+
+// ChildWorkflowID returns the child workflow ID for a node, if known.
+func (s *FlowState) ChildWorkflowID(nodeName string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id, ok := s.childWorkflows[nodeName]
+	return id, ok
+}
+
+// ChildWorkflows returns a copy of all registered child workflow IDs.
+func (s *FlowState) ChildWorkflows() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.childWorkflows))
+	for k, v := range s.childWorkflows {
+		out[k] = v
+	}
+	return out
 }
 
 // StateConfig defines state persistence behavior.

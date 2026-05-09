@@ -212,6 +212,11 @@ func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 		return fmt.Errorf("load persisted state: %w", err)
 	}
 
+	// Register childWorkflows query
+	workflow.SetQueryHandler(ctx, "childWorkflows", func() (map[string]string, error) {
+		return state.ChildWorkflows(), nil
+	})
+
 	err := f.executeInternal(ctx, state)
 
 	status := "success"
