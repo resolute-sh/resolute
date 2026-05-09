@@ -155,6 +155,19 @@ func TestNode_NoCompensation(t *testing.T) {
 	}
 }
 
+func TestNode_ByName_ExecutesByName(t *testing.T) {
+	t.Parallel()
+
+	node := NewNodeByName[string, string]("named-act", "test-named-activity", "input")
+
+	if node.Name() != "named-act" {
+		t.Errorf("Name() = %q, want %q", node.Name(), "named-act")
+	}
+	if node.activityName != "test-named-activity" {
+		t.Errorf("activityName = %q, want %q", node.activityName, "test-named-activity")
+	}
+}
+
 func TestDefaultActivityOptions(t *testing.T) {
 	t.Parallel()
 

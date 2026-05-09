@@ -29,6 +29,7 @@ type Window struct {
 type Node[I, O any] struct {
 	name            string
 	activity        func(context.Context, I) (O, error)
+	activityName    string // if set, execute by registered activity name instead of function pointer
 	input           I
 	options         ActivityOptions
 	outputKey       string
@@ -77,6 +78,17 @@ func NewNode[I, O any](name string, activity func(context.Context, I) (O, error)
 		activity: activity,
 		input:    input,
 		options:  DefaultActivityOptions(),
+	}
+}
+
+// NewNodeByName creates a node that executes an activity by its registered name.
+// Use this when the activity is registered with the worker by name (e.g., factory-created closures).
+func NewNodeByName[I, O any](name string, activityName string, input I) *Node[I, O] {
+	return &Node[I, O]{
+		name:         name,
+		activityName: activityName,
+		input:        input,
+		options:      DefaultActivityOptions(),
 	}
 }
 
@@ -266,7 +278,11 @@ func (n *Node[I, O]) Execute(ctx workflow.Context, state *FlowState) error {
 	ctx = workflow.WithActivityOptions(ctx, activityOpts)
 
 	var result O
-	err = workflow.ExecuteActivity(ctx, n.activity, resolvedInput).Get(ctx, &result)
+	if n.activityName != "" {
+		err = workflow.ExecuteActivity(ctx, n.activityName, resolvedInput).Get(ctx, &result)
+	} else {
+		err = workflow.ExecuteActivity(ctx, n.activity, resolvedInput).Get(ctx, &result)
+	}
 
 	RecordActivityExecution(RecordActivityExecutionInput{
 		NodeName: n.name,
