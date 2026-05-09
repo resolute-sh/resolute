@@ -262,6 +262,9 @@ func (f *Flow) executeInternal(ctx workflow.Context, state *FlowState) error {
 	var compensations []CompensationEntry
 
 	for i, step := range f.steps {
+		// Windowed steps are a flow-top-level concern: short-circuit by
+		// running the windowed step against all downstream steps as the
+		// per-batch pipeline.
 		if step.parallel && hasWindowedNodes(step) {
 			downstream := f.steps[i+1:]
 			if err := executeWindowed(ctx, step, downstream, state, f.name, f.stateConfig, f.hooks); err != nil {
@@ -273,34 +276,9 @@ func (f *Flow) executeInternal(ctx workflow.Context, state *FlowState) error {
 			return nil
 		}
 
-		if step.gate != nil {
-			if err := executeGateStep(ctx, step, state, f.name, f.hooks); err != nil {
-				return runCompensations(ctx, compensations, state, err)
-			}
-		} else if step.children != nil {
-			if err := executeChildrenStep(ctx, step, state, f.name, f.hooks); err != nil {
-				return runCompensations(ctx, compensations, state, err)
-			}
-		} else if step.conditional != nil {
-			if err := executeConditional(ctx, step.conditional, state, f.name, &compensations, f.hooks); err != nil {
-				return runCompensations(ctx, compensations, state, err)
-			}
-		} else if step.parallel {
-			if err := executeParallel(ctx, step, state, f.name, &compensations, f.hooks); err != nil {
-				return runCompensations(ctx, compensations, state, err)
-			}
-		} else if step.loop != nil {
-			if err := executeLoopStep(ctx, step, state, f.name, f.hooks); err != nil {
-				return runCompensations(ctx, compensations, state, err)
-			}
-		} else if step.parallelEach != nil {
-			if err := executeParallelEachStep(ctx, step, state, f.name, f.hooks); err != nil {
-				return runCompensations(ctx, compensations, state, err)
-			}
-		} else {
-			if err := executeSequential(ctx, step, state, f.name, &compensations, f.hooks); err != nil {
-				return runCompensations(ctx, compensations, state, err)
-			}
+		// Non-windowed: dispatch this single step through the shared executor.
+		if err := executeSteps(ctx, []Step{step}, state, f.name, &compensations, f.hooks); err != nil {
+			return runCompensations(ctx, compensations, state, err)
 		}
 	}
 
@@ -308,6 +286,53 @@ func (f *Flow) executeInternal(ctx workflow.Context, state *FlowState) error {
 		return fmt.Errorf("save persisted state: %w", err)
 	}
 
+	return nil
+}
+
+// executeSteps runs a sequence of Steps through the same dispatch logic as
+// Flow.executeInternal but without flow-level signal/query registration or
+// state persistence. It is shared between Flow.executeInternal (the top-level
+// flow body) and the Loop runner (which executes its Steps body once per
+// iteration).
+//
+// Compensation entries are appended to *compensations and are the caller's
+// responsibility to run on error. The returned error is wrapped with flow,
+// step, and node context via WrapFlowError (inside the per-kind executors).
+//
+// Note: windowed-step handling is intentionally excluded — windowing is only
+// valid at the flow top level, not inside Loop iterations.
+func executeSteps(ctx workflow.Context, steps []Step, state *FlowState, flowName string, compensations *[]CompensationEntry, hooks *FlowHooks) error {
+	for _, step := range steps {
+		if step.gate != nil {
+			if err := executeGateStep(ctx, step, state, flowName, hooks); err != nil {
+				return err
+			}
+		} else if step.children != nil {
+			if err := executeChildrenStep(ctx, step, state, flowName, hooks); err != nil {
+				return err
+			}
+		} else if step.conditional != nil {
+			if err := executeConditional(ctx, step.conditional, state, flowName, compensations, hooks); err != nil {
+				return err
+			}
+		} else if step.parallel {
+			if err := executeParallel(ctx, step, state, flowName, compensations, hooks); err != nil {
+				return err
+			}
+		} else if step.loop != nil {
+			if err := executeLoopStep(ctx, step, state, flowName, hooks); err != nil {
+				return err
+			}
+		} else if step.parallelEach != nil {
+			if err := executeParallelEachStep(ctx, step, state, flowName, hooks); err != nil {
+				return err
+			}
+		} else {
+			if err := executeSequential(ctx, step, state, flowName, compensations, hooks); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
