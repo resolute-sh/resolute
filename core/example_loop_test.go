@@ -1,29 +1,33 @@
 package core_test
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/resolute-sh/resolute/core"
 )
 
-// ExampleLoop demonstrates constructing a Loop step that threads a typed
-// counter state across iterations and exits when the While predicate
-// returns false.
-//
-// The Body option is omitted here for brevity; production callers pass a
-// real LoopBody[S] whose Execute typically calls workflow.ExecuteActivity
-// to invoke a registered activity. InitialState reads the seed S from
-// *FlowState; FinalState writes the final S back. While, MaxIterations,
-// InitialState, and FinalState all run in workflow code and must be
-// deterministic.
+// ExampleLoop demonstrates the Steps-based Loop API: each iteration runs the
+// noop body Step, AfterIteration mutates typed state by incrementing a
+// counter, and While exits when the counter reaches 2.
 func ExampleLoop() {
-	type counter struct{ N int }
+	type tick struct{ N int }
 
-	step := core.Loop[counter](
-		core.InitialState[counter](func(_ *core.FlowState) counter { return counter{} }),
-		core.While[counter](func(s counter) bool { return s.N < 3 }),
-		core.MaxIterations[counter](100),
-		core.FinalState[counter](func(_ *core.FlowState, _ counter) {}),
+	noop := func(_ context.Context, _ struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	}
+	noopNode := core.NewNode("noop", noop, struct{}{})
+
+	step := core.Loop[tick](
+		core.StateKey[tick]("ticker"),
+		core.InitialState[tick](func(_ *core.FlowState) tick { return tick{N: 0} }),
+		core.Steps[tick](core.AsStep(noopNode)),
+		core.AfterIteration[tick](func(s tick, _ core.FlowStateReader) tick {
+			s.N++
+			return s
+		}),
+		core.While[tick](func(s tick) bool { return s.N < 2 }),
+		core.MaxIterations[tick](10),
 	)
 	_ = step
 

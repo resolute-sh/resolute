@@ -371,7 +371,7 @@ func executeLoopStep(ctx workflow.Context, step Step, state *FlowState, flowName
 	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
-	_, err := step.loop.runner.runLoop(ctx, state)
+	_, err := step.loop.runner.runLoop(ctx, state, flowName, hooks)
 
 	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 	return err

@@ -382,3 +382,23 @@ func resolveInput[I any](ctx workflow.Context, input I, state *FlowState) (I, er
 	// Magic markers (CursorRef, OutputRef) are detected and replaced.
 	return resolve(input, state)
 }
+
+// asStep wraps a Node as a single-node sequential Step suitable for use
+// inside Loop's Steps option (in-package convenience). External callers
+// use the exported AsStep free function instead.
+func (n *Node[I, O]) asStep() Step {
+	return Step{
+		name:  n.Name(),
+		nodes: []ExecutableNode{n},
+	}
+}
+
+// AsStep wraps any ExecutableNode as a single-node sequential Step suitable
+// for use inside Loop's Steps option (or anywhere a Step is expected). The
+// step name defaults to the node name.
+func AsStep(n ExecutableNode) Step {
+	return Step{
+		name:  n.Name(),
+		nodes: []ExecutableNode{n},
+	}
+}

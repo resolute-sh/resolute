@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"testing"
 
 	"go.temporal.io/sdk/testsuite"
@@ -16,14 +17,21 @@ func TestFlowExecutor_LoopStepRuns(t *testing.T) {
 
 	var capturedFinal counterState
 
+	noop := func(_ context.Context, _ struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	}
+	noopStep := NewNode("noop", noop, struct{}{}).asStep()
+
 	wf := func(ctx workflow.Context) error {
 		// given
 		b := NewFlow("loop-test").TriggeredBy(Manual("test"))
 		ThenLoop[counterState](b, "loop-step",
-			Body[counterState](&counterBody{fn: func(s counterState) counterState {
+			StateKey[counterState]("counter.state"),
+			Steps[counterState](noopStep),
+			AfterIteration[counterState](func(s counterState, _ FlowStateReader) counterState {
 				s.N++
 				return s
-			}}),
+			}),
 			While[counterState](func(s counterState) bool { return s.N < 4 }),
 			MaxIterations[counterState](100),
 			InitialState[counterState](func(_ *FlowState) counterState {
@@ -40,6 +48,7 @@ func TestFlowExecutor_LoopStepRuns(t *testing.T) {
 	}
 
 	env.RegisterWorkflow(wf)
+	env.RegisterActivity(noop)
 	env.ExecuteWorkflow(wf)
 
 	// then

@@ -1,21 +1,10 @@
 package core
 
 import (
+	"fmt"
+
 	"go.temporal.io/sdk/workflow"
 )
-
-// LoopBody is the per-iteration step a caller supplies to flow.Loop. It is
-// typed in S so no `any` appears at the user boundary; the body receives the
-// current loop state and returns the next iteration's state (or an error).
-type LoopBody[S any] interface {
-	Execute(ctx workflow.Context, in S) (S, error)
-}
-
-// LoopBodyWithState is a LoopBody that also receives *FlowState.
-type LoopBodyWithState[S any] interface {
-	LoopBody[S]
-	ExecuteWithState(ctx workflow.Context, state S, fs *FlowState) (S, error)
-}
 
 // LoopOption configures a Loop. Apply options via the Loop or ThenLoop
 // constructors.
@@ -23,58 +12,85 @@ type LoopOption[S any] func(*loopConfig[S])
 
 // loopConfig is the internal configuration assembled from LoopOption values.
 type loopConfig[S any] struct {
-	body          LoopBody[S]
-	while         func(S) bool
-	maxIterations int
-	iterHook      func(IterationEvent)
-	canPolicy     ContinueAsNewPolicy // reserved; consumed when CAN emission lands in a future task
-	initialFromFS func(*FlowState) S
-	finalToFS     func(*FlowState, S)
+	steps           []Step
+	while           func(S) bool
+	maxIterations   int
+	stateKey        string
+	initialFromFS   func(*FlowState) S
+	finalToFS       func(*FlowState, S)
+	beforeIteration func(S, *FlowState) (S, bool)
+	afterIteration  func(S, FlowStateReader) S
+	iterHook        func(IterationEvent)
+	canPolicy       ContinueAsNewPolicy // reserved
 }
 
-// loopRunner is the unexported Step-level seam. Implementations are typed
-// (typedLoopRunner[S]) so the Step holds an interface, not an `any` field.
+// loopRunner is the unexported Step-level seam.
 type loopRunner interface {
-	runLoop(ctx workflow.Context, fs *FlowState) (LoopExitReason, error)
+	runLoop(ctx workflow.Context, fs *FlowState, flowName string, hooks *FlowHooks) (LoopExitReason, error)
 }
 
 // typedLoopRunner is the concrete generic implementation behind loopRunner.
-// It is constructed by Loop[S] and stored inside a loopStep via the
-// loopRunner interface, keeping S out of the non-generic Step type.
 type typedLoopRunner[S any] struct {
 	cfg *loopConfig[S]
 }
 
-func (r *typedLoopRunner[S]) runLoop(ctx workflow.Context, fs *FlowState) (LoopExitReason, error) {
+func (r *typedLoopRunner[S]) runLoop(ctx workflow.Context, fs *FlowState, flowName string, hooks *FlowHooks) (LoopExitReason, error) {
+	if r.cfg.stateKey == "" {
+		return LoopExitMaxIterations, fmt.Errorf("Loop: StateKey option is required")
+	}
+	if r.cfg.initialFromFS == nil {
+		return LoopExitMaxIterations, fmt.Errorf("Loop: InitialState option is required")
+	}
+	if r.cfg.while == nil {
+		return LoopExitMaxIterations, fmt.Errorf("Loop: While option is required")
+	}
+	if len(r.cfg.steps) == 0 {
+		return LoopExitMaxIterations, fmt.Errorf("Loop: Steps option requires at least one Step")
+	}
+
 	state := r.cfg.initialFromFS(fs)
+	Set(fs, r.cfg.stateKey, state)
+
 	reason := LoopExitMaxIterations
+
 	for i := 0; i < r.cfg.maxIterations; i++ {
 		if ctx.Err() != nil {
-			r.cfg.finalToFS(fs, state)
+			r.writeFinal(fs, state)
 			return LoopExitCancelled, ctx.Err()
 		}
 		if r.cfg.iterHook != nil {
 			r.cfg.iterHook(IterationEvent{Phase: "started", N: i + 1})
 		}
 
-		var next S
-		var err error
-		if bodyWS, ok := r.cfg.body.(LoopBodyWithState[S]); ok {
-			next, err = bodyWS.ExecuteWithState(ctx, state, fs)
-		} else {
-			next, err = r.cfg.body.Execute(ctx, state)
+		// BeforeIteration: drain signals, mutate S, optionally short-circuit.
+		skipBody := false
+		if r.cfg.beforeIteration != nil {
+			state, skipBody = r.cfg.beforeIteration(state, fs)
+			Set(fs, r.cfg.stateKey, state)
 		}
-		if err != nil {
-			r.cfg.finalToFS(fs, state)
-			return reason, err
+
+		if !skipBody {
+			// Execute Steps body via the shared step dispatcher. Compensations
+			// inside loop bodies are not collected — Loop iterations are
+			// considered atomic from the parent flow's perspective.
+			var ignoreCompensations []CompensationEntry
+			if err := executeSteps(ctx, r.cfg.steps, fs, flowName, &ignoreCompensations, hooks); err != nil {
+				r.writeFinal(fs, state)
+				return reason, err
+			}
 		}
-		state = next
+
+		// AfterIteration: read step outputs, return next S.
+		if r.cfg.afterIteration != nil {
+			state = r.cfg.afterIteration(state, fs)
+			Set(fs, r.cfg.stateKey, state)
+		}
 
 		if r.cfg.iterHook != nil {
 			r.cfg.iterHook(IterationEvent{Phase: "completed", N: i + 1})
 		}
 		if ctx.Err() != nil {
-			r.cfg.finalToFS(fs, state)
+			r.writeFinal(fs, state)
 			return LoopExitCancelled, ctx.Err()
 		}
 		if !r.cfg.while(state) {
@@ -82,36 +98,33 @@ func (r *typedLoopRunner[S]) runLoop(ctx workflow.Context, fs *FlowState) (LoopE
 			break
 		}
 	}
-	r.cfg.finalToFS(fs, state)
+
+	r.writeFinal(fs, state)
 	return reason, nil
 }
 
+func (r *typedLoopRunner[S]) writeFinal(fs *FlowState, state S) {
+	Set(fs, r.cfg.stateKey, state)
+	if r.cfg.finalToFS != nil {
+		r.cfg.finalToFS(fs, state)
+	}
+}
+
 // loopStep is the non-generic carrier stored on Step for loop execution.
-// It dispatches through the loopRunner interface so the Step type stays
-// free of generic parameters.
 type loopStep struct {
 	runner loopRunner
 }
 
-// Loop returns a Step that executes Body repeatedly while While returns true,
+// Loop returns a Step that re-executes a Steps body while While returns true,
 // capped by MaxIterations. State is threaded between iterations as the typed
-// value S; each iteration body output becomes the next iteration's input. The
-// While predicate runs after each body completion.
+// value S; the framework persists S at the FlowState key declared via
+// StateKey before/after each iteration so observability hooks and downstream
+// readers see a consistent value.
 //
-// State enters and leaves the loop via *FlowState — InitialState reads the
-// seed S, FinalState writes the final S back. Inter-iteration threading uses
-// a workflow-local Go variable to avoid the *FlowState lock contention path.
-//
-// Determinism contract: Body activities are unconstrained, but the While
-// predicate, MaxIterations value, IterationHook callback, InitialState, and
-// FinalState closures all run in workflow code and must be deterministic
-// functions of their inputs (no time.Now, no rand, no map iteration order,
-// no I/O).
-//
-// History event emission (IterationStarted/IterationCompleted/LoopExited
-// markers) is planned for a future task; the current implementation only
-// surfaces termination via the LoopExitReason returned through the Step
-// executor.
+// Determinism contract: Steps may invoke activities (no determinism
+// constraint). The While predicate, BeforeIteration, AfterIteration,
+// InitialState, FinalState, IterationHook, and MaxIterations all run in
+// workflow code and must be deterministic.
 func Loop[S any](opts ...LoopOption[S]) Step {
 	cfg := &loopConfig[S]{
 		maxIterations: 1000,
@@ -125,9 +138,7 @@ func Loop[S any](opts ...LoopOption[S]) Step {
 	}
 }
 
-// ThenLoop adds a Loop step to the builder under the given name. It is a
-// generic free function because Go does not allow generic methods on
-// non-generic types; call sites read flow.ThenLoop(b, "name", ...).
+// ThenLoop adds a Loop step to the builder under the given name.
 func ThenLoop[S any](b *FlowBuilder, name string, opts ...LoopOption[S]) *FlowBuilder {
 	s := Loop[S](opts...)
 	s.name = name
@@ -135,42 +146,59 @@ func ThenLoop[S any](b *FlowBuilder, name string, opts ...LoopOption[S]) *FlowBu
 	return b
 }
 
-// Body sets the iteration body. The body receives the current S and returns
-// the next S; iteration continues until While returns false or MaxIterations
-// is reached.
-func Body[S any](b LoopBody[S]) LoopOption[S] {
-	return func(c *loopConfig[S]) { c.body = b }
+// Steps sets the per-iteration Steps body. Required. Each iteration runs
+// these Steps in order through the standard step executor, so observability
+// hooks (BeforeStep / AfterStep / BeforeNode / AfterNode) fire normally.
+func Steps[S any](steps ...Step) LoopOption[S] {
+	return func(c *loopConfig[S]) { c.steps = steps }
 }
 
-// BodyWithState sets a loop body that receives both S and *FlowState.
-func BodyWithState[S any](b LoopBodyWithState[S]) LoopOption[S] {
-	return func(c *loopConfig[S]) { c.body = b }
+// StateKey sets the FlowState key where the typed state S is persisted
+// across iterations. Required. Reads/writes happen at the start and end of
+// each iteration; downstream code can also read it via core.Get[S].
+func StateKey[S any](key string) LoopOption[S] {
+	return func(c *loopConfig[S]) { c.stateKey = key }
 }
 
-// While sets the continuation predicate. The runner evaluates While after
-// each body completion; when it returns false (or MaxIterations is reached
-// or the workflow is cancelled), the loop exits.
-//
-// The predicate MUST be deterministic over S — no time.Now, no rand, no map
-// iteration order, no external I/O, no captured state that varies across
-// replays. Violations cause Temporal replay failures (NonDeterministicError);
-// the violation typically does NOT surface on first execution, only on
-// worker restart or query replay. Layer 2 workflow replay tests in
-// resolute/core (Task 13) verify deterministic predicates pass replay.
+// While sets the continuation predicate. Evaluated after each iteration
+// (after AfterIteration). Must be deterministic over S.
 func While[S any](cond func(S) bool) LoopOption[S] {
 	return func(c *loopConfig[S]) { c.while = cond }
 }
 
-// InitialState supplies the function that extracts the loop's seed S from the
-// flow's *FlowState. Required.
+// InitialState supplies the function that produces the seed S for the loop.
+// Called once before the first iteration; the result is written to the
+// FlowState key and threaded into iteration 1's BeforeIteration / Steps.
+// Required.
 func InitialState[S any](extract func(*FlowState) S) LoopOption[S] {
 	return func(c *loopConfig[S]) { c.initialFromFS = extract }
 }
 
-// FinalState supplies the function that writes the loop's final S back into
-// the flow's *FlowState. Required.
+// FinalState installs an optional callback that runs once after the last
+// iteration to write the final S anywhere the caller wants (e.g. a different
+// FlowState key for downstream Steps).
 func FinalState[S any](inject func(*FlowState, S)) LoopOption[S] {
 	return func(c *loopConfig[S]) { c.finalToFS = inject }
+}
+
+// BeforeIteration installs a callback that runs at the start of every
+// iteration with mutating *FlowState access. Use it to drain signals,
+// perform pre-flight checks, and update S in workflow code. Returning
+// skipBody=true skips the Steps body for this iteration but still runs
+// AfterIteration and the While predicate (useful for cancel signals).
+//
+// Runs in workflow code; must be deterministic.
+func BeforeIteration[S any](fn func(s S, fs *FlowState) (S, bool)) LoopOption[S] {
+	return func(c *loopConfig[S]) { c.beforeIteration = fn }
+}
+
+// AfterIteration installs a callback that runs at the end of every iteration
+// with read-only FlowStateReader access. Use it to merge Step outputs into S.
+// Returns the next S (written back to the StateKey).
+//
+// Runs in workflow code; must be deterministic.
+func AfterIteration[S any](fn func(s S, fs FlowStateReader) S) LoopOption[S] {
+	return func(c *loopConfig[S]) { c.afterIteration = fn }
 }
 
 // MaxIterations sets the hard ceiling on iteration count. Default 1000.
@@ -178,44 +206,38 @@ func MaxIterations[S any](n int) LoopOption[S] {
 	return func(c *loopConfig[S]) { c.maxIterations = n }
 }
 
-// IterationHook installs a callback invoked around each iteration. The hook
-// runs in workflow code and must be deterministic.
+// IterationHook installs a low-detail per-iteration callback for "iteration
+// N started/completed" event emission. Distinct from FlowHooks (which observe
+// Step/Node lifecycle) and from BeforeIteration/AfterIteration (which thread
+// state). Runs in workflow code; must be deterministic.
 func IterationHook[S any](h func(IterationEvent)) LoopOption[S] {
 	return func(c *loopConfig[S]) { c.iterHook = h }
 }
 
 // ContinueAsNewAfter installs a continue-as-new policy. Default: never.
+// Reserved; consumed when CAN emission lands in a future task.
 func ContinueAsNewAfter[S any](p ContinueAsNewPolicy) LoopOption[S] {
 	return func(c *loopConfig[S]) { c.canPolicy = p }
 }
 
-// IterationEvent is the payload delivered to an IterationHook. Phase is one
-// of "started" or "completed"; N is the 1-indexed iteration number.
+// IterationEvent is the payload delivered to an IterationHook.
 type IterationEvent struct {
-	Phase string
-	N     int
+	Phase string // "started" | "completed"
+	N     int    // 1-indexed iteration number
 }
 
-// ContinueAsNewPolicy controls when the loop emits ContinueAsNew. Both
-// fields default to 0, meaning "never emit ContinueAsNew."
+// ContinueAsNewPolicy controls when the loop emits ContinueAsNew.
 type ContinueAsNewPolicy struct {
-	AfterIterations   int   // 0 = never
-	AfterHistoryBytes int64 // 0 = never (best-effort, checked between iterations)
+	AfterIterations   int
+	AfterHistoryBytes int64
 }
 
-// LoopExitReason identifies why a Loop terminated. It is recorded on the
-// final LoopExited marker in workflow history.
+// LoopExitReason identifies why a Loop terminated.
 type LoopExitReason string
 
 const (
-	// LoopExitCondition indicates the While predicate returned false.
-	LoopExitCondition LoopExitReason = "condition"
-	// LoopExitMaxIterations indicates MaxIterations was reached.
+	LoopExitCondition     LoopExitReason = "condition"
 	LoopExitMaxIterations LoopExitReason = "max_iterations"
-	// LoopExitCancelled indicates the workflow context was cancelled mid-loop.
-	LoopExitCancelled LoopExitReason = "cancelled"
-	// LoopExitContinueAsNew indicates the loop emitted ContinueAsNew per
-	// ContinueAsNewPolicy. Reserved for a future task; the current runLoop
-	// never returns this value.
+	LoopExitCancelled     LoopExitReason = "cancelled"
 	LoopExitContinueAsNew LoopExitReason = "continue_as_new"
 )
