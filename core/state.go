@@ -20,8 +20,8 @@ type WindowMeta struct {
 // It holds input data, activity outputs, cursor state, and buffered signals
 // for incremental processing.
 type FlowState struct {
-	mu      sync.RWMutex
-	input   map[string][]byte // Serialized initial input
+	mu    sync.RWMutex
+	input map[string][]byte // Serialized initial input
 	// results holds activity outputs. Untyped storage required because activities
 	// return heterogeneous types; type safety restored via Get[T]() accessor.
 	results        map[string]any

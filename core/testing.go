@@ -11,20 +11,20 @@ import (
 // FlowTester provides a test harness for running flows without Temporal.
 // It allows mocking activity implementations and asserting on execution.
 type FlowTester struct {
-	mu              sync.RWMutex
-	mocks           map[string]mockEntry
-	gateMocks       map[string]GateResult
-	childFlowMocks  map[string]func(*FlowState) (*FlowState, error)
-	callCounts      map[string]int
-	callArgs        map[string][]any
-	applyRateLimit  bool
+	mu             sync.RWMutex
+	mocks          map[string]mockEntry
+	gateMocks      map[string]GateResult
+	childFlowMocks map[string]func(*FlowState) (*FlowState, error)
+	callCounts     map[string]int
+	callArgs       map[string][]any
+	applyRateLimit bool
 }
 
 type mockEntry struct {
 	fn         reflect.Value
 	inputType  reflect.Type
-	fixedValue any    // For MockValue - just return this value
-	fixedError error  // For MockError - just return this error
+	fixedValue any   // For MockValue - just return this value
+	fixedError error // For MockError - just return this error
 }
 
 // NewFlowTester creates a new test harness.

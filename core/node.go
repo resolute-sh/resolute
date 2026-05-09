@@ -43,7 +43,7 @@ type Node[I, O any] struct {
 
 // ActivityOptions configures retry and timeout behavior for a node.
 type ActivityOptions struct {
-	RetryPolicy        *RetryPolicy
+	RetryPolicy         *RetryPolicy
 	StartToCloseTimeout time.Duration
 	HeartbeatTimeout    time.Duration
 	TaskQueue           string
