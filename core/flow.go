@@ -15,6 +15,7 @@ type Flow struct {
 	steps       []Step
 	stateConfig *StateConfig
 	hooks       *FlowHooks
+	signals     []SignalDef // registered signals for non-blocking buffering
 }
 
 // Step represents one execution unit within a flow.
@@ -128,6 +129,14 @@ func (b *FlowBuilder) ThenChildren(name string, config ChildFlowConfig) *FlowBui
 	return b
 }
 
+// WithSignals registers signals that this flow accepts.
+// Signal handlers are installed at workflow startup and buffer
+// payloads in FlowState.Signals for non-blocking consumption.
+func (b *FlowBuilder) WithSignals(signals ...SignalDef) *FlowBuilder {
+	b.flow.signals = append(b.flow.signals, signals...)
+	return b
+}
+
 // WithState overrides the default state backend (.resolute/).
 // Use this to configure cloud storage backends (S3, GCS) for production.
 func (b *FlowBuilder) WithState(cfg StateConfig) *FlowBuilder {
@@ -174,13 +183,36 @@ func (f *Flow) Hooks() *FlowHooks {
 	return f.hooks
 }
 
+// Signals returns the flow's registered signal definitions.
+func (f *Flow) Signals() []SignalDef {
+	return f.signals
+}
+
 // Execute runs the flow as a Temporal workflow.
 func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 	startTime := time.Now()
 
 	invokeBeforeFlow(f.hooks, f.name)
 
-	err := f.executeInternal(ctx, input)
+	// Create state and register signal handlers before execution
+	state := NewFlowState(input)
+	for _, sig := range f.signals {
+		sigName := sig.Name
+		sigChan := workflow.GetSignalChannel(ctx, sigName)
+		workflow.Go(ctx, func(gCtx workflow.Context) {
+			for {
+				var payload interface{}
+				sigChan.Receive(gCtx, &payload)
+				state.Signals().Inject(sigName, payload)
+			}
+		})
+	}
+
+	if err := state.LoadPersisted(ctx, f.name, f.stateConfig); err != nil {
+		return fmt.Errorf("load persisted state: %w", err)
+	}
+
+	err := f.executeInternal(ctx, state)
 
 	status := "success"
 	if err != nil {
@@ -198,13 +230,7 @@ func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 	return err
 }
 
-func (f *Flow) executeInternal(ctx workflow.Context, input FlowInput) error {
-	state := NewFlowState(input)
-
-	if err := state.LoadPersisted(ctx, f.name, f.stateConfig); err != nil {
-		return fmt.Errorf("load persisted state: %w", err)
-	}
-
+func (f *Flow) executeInternal(ctx workflow.Context, state *FlowState) error {
 	var compensations []CompensationEntry
 
 	for i, step := range f.steps {
