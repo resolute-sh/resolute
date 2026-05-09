@@ -369,3 +369,26 @@ func TestFlowState_Signals(t *testing.T) {
 		}
 	})
 }
+
+func TestFlowStateReader_FlowStateSatisfiesInterface(t *testing.T) {
+	// Compile-time check: *FlowState must satisfy FlowStateReader.
+	var _ FlowStateReader = (*FlowState)(nil)
+
+	// Runtime check: a populated FlowState read through the interface
+	// returns the same values as direct *FlowState access.
+	fs := NewFlowState(FlowInput{})
+	Set(fs, "answer", 42)
+
+	var reader FlowStateReader = fs
+	got := Get[int](reader, "answer")
+	if got != 42 {
+		t.Fatalf("Get via FlowStateReader = %d, want 42", got)
+	}
+	if !Has(reader, "answer") {
+		t.Fatal("Has via FlowStateReader returned false for present key")
+	}
+	keys := Keys(reader)
+	if len(keys) != 1 || keys[0] != "answer" {
+		t.Fatalf("Keys via FlowStateReader = %v, want [answer]", keys)
+	}
+}

@@ -38,6 +38,27 @@ type Cursor struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// FlowStateReader is the read-only view of FlowState exposed to observability
+// hooks. Mutations belong in Step execution and Iteration callbacks; hooks
+// observe but never write. *FlowState satisfies this interface.
+type FlowStateReader interface {
+	// GetResult returns a raw result by key, or nil if absent. Prefer the
+	// typed Get[T] / GetSafe[T] free functions for type-safe access.
+	// Note: nil is also returned for keys present with a nil value; use
+	// HasResult to distinguish presence from nil-value.
+	GetResult(key string) any
+
+	// HasResult returns true if the key exists in results, regardless of
+	// whether its stored value is nil.
+	HasResult(key string) bool
+
+	// GetInputData returns raw input data by key.
+	GetInputData(key string) ([]byte, bool)
+
+	// GetCursor returns the cursor for a data source.
+	GetCursor(source string) Cursor
+}
+
 // NewFlowState creates a new flow state with the given input.
 func NewFlowState(input FlowInput) *FlowState {
 	return &FlowState{
@@ -83,6 +104,15 @@ func (s *FlowState) SetResult(key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.results[key] = value
+}
+
+// HasResult returns true if the key exists in state results, even if the
+// stored value is nil. Satisfies the FlowStateReader interface.
+func (s *FlowState) HasResult(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.results[key]
+	return ok
 }
 
 // GetCursor returns the cursor for a data source.
@@ -258,42 +288,33 @@ func (c Cursor) TimeOr(def time.Time) time.Time {
 
 // Get retrieves a typed value from results.
 // Panics if the key doesn't exist or type doesn't match.
-func Get[T any](s *FlowState, key string) T {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	val, ok := s.results[key]
-	if !ok {
+func Get[T any](s FlowStateReader, key string) T {
+	val := s.GetResult(key)
+	if val == nil {
 		panic("key not found: " + key)
 	}
-
 	typed, ok := val.(T)
 	if !ok {
 		panic("type mismatch for key: " + key)
 	}
-
 	return typed
 }
 
 // GetOr retrieves a typed value from results with a default fallback.
-func GetOr[T any](s *FlowState, key string, defaultVal T) T {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	val, ok := s.results[key]
-	if !ok {
+func GetOr[T any](s FlowStateReader, key string, defaultVal T) T {
+	val := s.GetResult(key)
+	if val == nil {
 		return defaultVal
 	}
-
 	typed, ok := val.(T)
 	if !ok {
 		return defaultVal
 	}
-
 	return typed
 }
 
-// Set stores a typed value in results.
+// Set stores a typed value in results. Mutating accessor — takes *FlowState,
+// not FlowStateReader, by design (hooks observe; they do not mutate).
 func Set[T any](s *FlowState, key string, value T) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -302,27 +323,22 @@ func Set[T any](s *FlowState, key string, value T) {
 
 // GetSafe retrieves a typed value from results with error handling.
 // Returns an error if the key doesn't exist or type doesn't match.
-func GetSafe[T any](s *FlowState, key string) (T, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+func GetSafe[T any](s FlowStateReader, key string) (T, error) {
 	var zero T
-	val, ok := s.results[key]
-	if !ok {
+	val := s.GetResult(key)
+	if val == nil {
 		return zero, fmt.Errorf("key %q not found in state", key)
 	}
-
 	typed, ok := val.(T)
 	if !ok {
 		return zero, fmt.Errorf("key %q: expected %T, got %T", key, zero, val)
 	}
-
 	return typed, nil
 }
 
 // MustGet retrieves a typed value from results.
 // Panics with a descriptive error if the key doesn't exist or type doesn't match.
-func MustGet[T any](s *FlowState, key string) T {
+func MustGet[T any](s FlowStateReader, key string) T {
 	val, err := GetSafe[T](s, key)
 	if err != nil {
 		panic(err)
@@ -330,21 +346,25 @@ func MustGet[T any](s *FlowState, key string) T {
 	return val
 }
 
-// Has returns true if the key exists in state results.
-func Has(s *FlowState, key string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.results[key]
-	return ok
+// Has returns true if the key exists in state results, even if the stored
+// value is nil.
+func Has(s FlowStateReader, key string) bool {
+	return s.HasResult(key)
 }
 
-// Keys returns all keys in state results, sorted alphabetically.
-func Keys(s *FlowState) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	keys := make([]string, 0, len(s.results))
-	for k := range s.results {
+// Keys returns all keys in state results, sorted alphabetically. Returns nil
+// when the underlying reader is not a *FlowState — exposing enumeration on
+// the bare interface would force every adapter to implement it, and hooks
+// rarely need to enumerate.
+func Keys(s FlowStateReader) []string {
+	fs, ok := s.(*FlowState)
+	if !ok {
+		return nil
+	}
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	keys := make([]string, 0, len(fs.results))
+	for k := range fs.results {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
