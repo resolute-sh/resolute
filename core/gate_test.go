@@ -211,10 +211,10 @@ func TestGate_WithHooks(t *testing.T) {
 	}
 
 	hooks := &FlowHooks{
-		BeforeStep: func(hc HookContext) { record("BeforeStep:" + hc.StepName) },
-		AfterStep:  func(hc HookContext) { record("AfterStep:" + hc.StepName) },
-		BeforeNode: func(hc HookContext) { record("BeforeNode:" + hc.NodeName) },
-		AfterNode:  func(hc HookContext) { record("AfterNode:" + hc.NodeName) },
+		BeforeStep: func(hc HookContext, _ FlowStateReader) { record("BeforeStep:" + hc.StepName) },
+		AfterStep:  func(hc HookContext, _ FlowStateReader) { record("AfterStep:" + hc.StepName) },
+		BeforeNode: func(hc HookContext, _ FlowStateReader) { record("BeforeNode:" + hc.NodeName) },
+		AfterNode:  func(hc HookContext, _ FlowStateReader) { record("AfterNode:" + hc.NodeName) },
 	}
 
 	flow := NewFlow("gate-hooks").

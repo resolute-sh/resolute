@@ -29,12 +29,12 @@ func TestHooks_InvocationOrder(t *testing.T) {
 	}
 
 	hooks := &FlowHooks{
-		BeforeFlow: func(hc HookContext) { record("BeforeFlow:" + hc.FlowName) },
-		AfterFlow:  func(hc HookContext) { record("AfterFlow:" + hc.FlowName) },
-		BeforeStep: func(hc HookContext) { record("BeforeStep:" + hc.StepName) },
-		AfterStep:  func(hc HookContext) { record("AfterStep:" + hc.StepName) },
-		BeforeNode: func(hc HookContext) { record("BeforeNode:" + hc.NodeName) },
-		AfterNode:  func(hc HookContext) { record("AfterNode:" + hc.NodeName) },
+		BeforeFlow: func(hc HookContext, _ FlowStateReader) { record("BeforeFlow:" + hc.FlowName) },
+		AfterFlow:  func(hc HookContext, _ FlowStateReader) { record("AfterFlow:" + hc.FlowName) },
+		BeforeStep: func(hc HookContext, _ FlowStateReader) { record("BeforeStep:" + hc.StepName) },
+		AfterStep:  func(hc HookContext, _ FlowStateReader) { record("AfterStep:" + hc.StepName) },
+		BeforeNode: func(hc HookContext, _ FlowStateReader) { record("BeforeNode:" + hc.NodeName) },
+		AfterNode:  func(hc HookContext, _ FlowStateReader) { record("AfterNode:" + hc.NodeName) },
 	}
 
 	node1 := NewNode("fetch", func(ctx context.Context, in hookInput) (hookOutput, error) {
@@ -127,7 +127,7 @@ func TestHooks_PartialNilSafety(t *testing.T) {
 	// given — hooks struct with only some callbacks set
 	var called bool
 	hooks := &FlowHooks{
-		AfterFlow: func(hc HookContext) { called = true },
+		AfterFlow: func(hc HookContext, _ FlowStateReader) { called = true },
 	}
 
 	node := NewNode("step", func(ctx context.Context, in hookInput) (hookOutput, error) {
@@ -161,7 +161,7 @@ func TestHooks_AfterNodeReceivesDuration(t *testing.T) {
 	// given
 	var capturedDuration time.Duration
 	hooks := &FlowHooks{
-		AfterNode: func(hc HookContext) {
+		AfterNode: func(hc HookContext, _ FlowStateReader) {
 			capturedDuration = hc.Duration
 		},
 	}
@@ -197,7 +197,7 @@ func TestHooks_AfterNodeReceivesError(t *testing.T) {
 	// given
 	var capturedErr error
 	hooks := &FlowHooks{
-		AfterNode: func(hc HookContext) {
+		AfterNode: func(hc HookContext, _ FlowStateReader) {
 			capturedErr = hc.Error
 		},
 	}
@@ -235,7 +235,7 @@ func TestHooks_AfterFlowReceivesError(t *testing.T) {
 	// given
 	var capturedErr error
 	hooks := &FlowHooks{
-		AfterFlow: func(hc HookContext) {
+		AfterFlow: func(hc HookContext, _ FlowStateReader) {
 			capturedErr = hc.Error
 		},
 	}
@@ -267,62 +267,6 @@ func TestHooks_AfterFlowReceivesError(t *testing.T) {
 	}
 }
 
-func TestHooks_OnCost(t *testing.T) {
-	t.Parallel()
-
-	// given
-	var captured CostEntry
-	hooks := &FlowHooks{
-		OnCost: func(entry CostEntry) {
-			captured = entry
-		},
-	}
-
-	entry := CostEntry{
-		NodeName:  "llm-call",
-		Model:     "claude-sonnet-4-20250514",
-		Provider:  "anthropic",
-		TokensIn:  1000,
-		TokensOut: 500,
-		CostUSD:   0.0045,
-		Duration:  2 * time.Second,
-		Metadata:  map[string]string{"session": "abc123"},
-	}
-
-	// when
-	invokeCost(hooks, entry)
-
-	// then
-	if captured.NodeName != "llm-call" {
-		t.Errorf("NodeName: got %q, want %q", captured.NodeName, "llm-call")
-	}
-	if captured.Model != "claude-sonnet-4-20250514" {
-		t.Errorf("Model: got %q, want %q", captured.Model, "claude-sonnet-4-20250514")
-	}
-	if captured.TokensIn != 1000 {
-		t.Errorf("TokensIn: got %d, want %d", captured.TokensIn, 1000)
-	}
-	if captured.TokensOut != 500 {
-		t.Errorf("TokensOut: got %d, want %d", captured.TokensOut, 500)
-	}
-	if captured.CostUSD != 0.0045 {
-		t.Errorf("CostUSD: got %f, want %f", captured.CostUSD, 0.0045)
-	}
-	if captured.Metadata["session"] != "abc123" {
-		t.Errorf("Metadata[session]: got %q, want %q", captured.Metadata["session"], "abc123")
-	}
-}
-
-func TestHooks_OnCostNilSafety(t *testing.T) {
-	t.Parallel()
-
-	// should not panic
-	invokeCost(nil, CostEntry{NodeName: "test"})
-
-	hooks := &FlowHooks{}
-	invokeCost(hooks, CostEntry{NodeName: "test"})
-}
-
 func TestHooks_ParallelStepHookOrder(t *testing.T) {
 	t.Parallel()
 
@@ -336,10 +280,10 @@ func TestHooks_ParallelStepHookOrder(t *testing.T) {
 	}
 
 	hooks := &FlowHooks{
-		BeforeStep: func(hc HookContext) { record("BeforeStep:" + hc.StepName) },
-		AfterStep:  func(hc HookContext) { record("AfterStep:" + hc.StepName) },
-		BeforeNode: func(hc HookContext) { record("BeforeNode:" + hc.NodeName) },
-		AfterNode:  func(hc HookContext) { record("AfterNode:" + hc.NodeName) },
+		BeforeStep: func(hc HookContext, _ FlowStateReader) { record("BeforeStep:" + hc.StepName) },
+		AfterStep:  func(hc HookContext, _ FlowStateReader) { record("AfterStep:" + hc.StepName) },
+		BeforeNode: func(hc HookContext, _ FlowStateReader) { record("BeforeNode:" + hc.NodeName) },
+		AfterNode:  func(hc HookContext, _ FlowStateReader) { record("AfterNode:" + hc.NodeName) },
 	}
 
 	p1 := NewNode("p1", func(ctx context.Context, in hookInput) (hookOutput, error) {
@@ -390,7 +334,7 @@ func TestHooks_ConditionalBranch(t *testing.T) {
 	var mu sync.Mutex
 	var nodeNames []string
 	hooks := &FlowHooks{
-		BeforeNode: func(hc HookContext) {
+		BeforeNode: func(hc HookContext, _ FlowStateReader) {
 			mu.Lock()
 			nodeNames = append(nodeNames, hc.NodeName)
 			mu.Unlock()
@@ -453,7 +397,7 @@ func TestHooks_HookContextFields(t *testing.T) {
 	// given
 	var captured HookContext
 	hooks := &FlowHooks{
-		BeforeNode: func(hc HookContext) {
+		BeforeNode: func(hc HookContext, _ FlowStateReader) {
 			captured = hc
 		},
 	}
@@ -487,5 +431,46 @@ func TestHooks_HookContextFields(t *testing.T) {
 	}
 	if captured.NodeName != "my-node" {
 		t.Errorf("NodeName: got %q, want %q", captured.NodeName, "my-node")
+	}
+}
+
+func TestFlowHooks_AfterNodeReceivesFlowStateReader(t *testing.T) {
+	type out struct{ Value int }
+
+	var capturedReader FlowStateReader
+	var capturedNode string
+
+	hooks := &FlowHooks{
+		AfterNode: func(hc HookContext, fs FlowStateReader) {
+			capturedReader = fs
+			capturedNode = hc.NodeName
+		},
+	}
+
+	node := NewNode("compute", func(ctx context.Context, in struct{}) (out, error) {
+		return out{Value: 99}, nil
+	}, struct{}{})
+
+	flow := NewFlow("hook-reader-flow").
+		TriggeredBy(Manual("test")).
+		WithHooks(hooks).
+		Then(node).
+		Build()
+
+	tester := NewFlowTester().MockValue("compute", out{Value: 99})
+
+	if _, err := tester.Run(flow, FlowInput{}); err != nil {
+		t.Fatalf("flow run failed: %v", err)
+	}
+
+	if capturedNode != "compute" {
+		t.Fatalf("AfterNode hook saw node %q, want %q", capturedNode, "compute")
+	}
+	if capturedReader == nil {
+		t.Fatal("AfterNode hook did not receive FlowStateReader")
+	}
+	got := Get[out](capturedReader, "compute")
+	if got.Value != 99 {
+		t.Fatalf("FlowStateReader.Get returned %d, want 99", got.Value)
 	}
 }

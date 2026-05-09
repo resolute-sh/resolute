@@ -206,10 +206,12 @@ func (f *Flow) Signals() []SignalDef {
 func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 	startTime := time.Now()
 
-	invokeBeforeFlow(f.hooks, f.name)
-
-	// Create state and register signal handlers before execution
+	// Create state BEFORE invoking BeforeFlow so the hook receives a valid reader.
 	state := NewFlowState(input)
+
+	invokeBeforeFlow(f.hooks, f.name, state)
+
+	// Register signal handlers
 	for _, sig := range f.signals {
 		sigName := sig.Name
 		sigChan := workflow.GetSignalChannel(ctx, sigName)
@@ -245,7 +247,7 @@ func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 		status = "error"
 	}
 
-	invokeAfterFlow(f.hooks, f.name, time.Since(startTime), err)
+	invokeAfterFlow(f.hooks, f.name, time.Since(startTime), err, state)
 
 	RecordFlowExecution(RecordFlowExecutionInput{
 		FlowName: f.name,
@@ -311,16 +313,16 @@ func (f *Flow) executeInternal(ctx workflow.Context, state *FlowState) error {
 
 // executeGateStep runs a gate node within a step, invoking hooks.
 func executeGateStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
-	invokeBeforeNode(hooks, flowName, step.name, step.gate.Name())
+	invokeBeforeNode(hooks, flowName, step.name, step.gate.Name(), state)
 	nodeStart := time.Now()
 
 	err := step.gate.Execute(ctx, state)
 
-	invokeAfterNode(hooks, flowName, step.name, step.gate.Name(), time.Since(nodeStart), err)
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+	invokeAfterNode(hooks, flowName, step.name, step.gate.Name(), time.Since(nodeStart), err, state)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 
 	return err
 }
@@ -328,12 +330,12 @@ func executeGateStep(ctx workflow.Context, step Step, state *FlowState, flowName
 // executeChildrenStep runs child workflows within a step, invoking hooks.
 // Full implementation in Phase 0C.
 func executeChildrenStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
 	err := step.children.Execute(ctx, state)
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 	return err
 }
 
@@ -341,24 +343,24 @@ func executeChildrenStep(ctx workflow.Context, step Step, state *FlowState, flow
 // returned LoopExitReason is currently discarded; future work emits it via
 // the Sink (see Plan A §12 deferred items).
 func executeLoopStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
 	_, err := step.loop.runner.runLoop(ctx, state)
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 	return err
 }
 
 // executeParallelEachStep runs a ParallelEach step, invoking step hooks
 // before/after. Errors from the runner propagate up.
 func executeParallelEachStep(ctx workflow.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
 	err := step.parallelEach.runner.runParallelEach(ctx, state)
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 	return err
 }
 
@@ -366,18 +368,18 @@ func executeParallelEachStep(ctx workflow.Context, step Step, state *FlowState, 
 func executeSequential(ctx workflow.Context, step Step, state *FlowState, flowName string, compensations *[]CompensationEntry, hooks *FlowHooks) error {
 	node := step.nodes[0]
 
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
-	invokeBeforeNode(hooks, flowName, step.name, node.Name())
+	invokeBeforeNode(hooks, flowName, step.name, node.Name(), state)
 	nodeStart := time.Now()
 
 	err := node.Execute(ctx, state)
 
-	invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err)
+	invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err, state)
 
 	if err != nil {
-		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 		return WrapFlowError(flowName, step.name, node.Name(), node.Input(), err)
 	}
 
@@ -388,13 +390,13 @@ func executeSequential(ctx workflow.Context, step Step, state *FlowState, flowNa
 		})
 	}
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil, state)
 	return nil
 }
 
 // executeParallel runs multiple nodes concurrently and waits for all to complete.
 func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName string, compensations *[]CompensationEntry, hooks *FlowHooks) error {
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
 	preSnapshot := state.Snapshot()
@@ -406,12 +408,12 @@ func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName
 		idx := i
 		n := node
 		workflow.Go(ctx, func(gCtx workflow.Context) {
-			invokeBeforeNode(hooks, flowName, step.name, n.Name())
+			invokeBeforeNode(hooks, flowName, step.name, n.Name(), state)
 			nodeStart := time.Now()
 
 			errs[idx] = n.Execute(gCtx, state)
 
-			invokeAfterNode(hooks, flowName, step.name, n.Name(), time.Since(nodeStart), errs[idx])
+			invokeAfterNode(hooks, flowName, step.name, n.Name(), time.Since(nodeStart), errs[idx], state)
 			doneCh.Send(gCtx, idx)
 		})
 	}
@@ -432,12 +434,12 @@ func executeParallel(ctx workflow.Context, step Step, state *FlowState, flowName
 
 	for i, err := range errs {
 		if err != nil {
-			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 			return WrapFlowError(flowName, step.name, step.nodes[i].Name(), step.nodes[i].Input(), err)
 		}
 	}
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil, state)
 	return nil
 }
 

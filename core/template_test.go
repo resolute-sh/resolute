@@ -289,9 +289,9 @@ func TestFlowTemplate_WithHooks(t *testing.T) {
 	}
 
 	hooks := &FlowHooks{
-		BeforeFlow: func(hc HookContext) { record("BeforeFlow") },
-		AfterFlow:  func(hc HookContext) { record("AfterFlow") },
-		BeforeNode: func(hc HookContext) { record("BeforeNode:" + hc.NodeName) },
+		BeforeFlow: func(hc HookContext, _ FlowStateReader) { record("BeforeFlow") },
+		AfterFlow:  func(hc HookContext, _ FlowStateReader) { record("AfterFlow") },
+		BeforeNode: func(hc HookContext, _ FlowStateReader) { record("BeforeNode:" + hc.NodeName) },
 	}
 
 	node := NewNode("work", func(ctx context.Context, in tmplInput) (tmplOutput, error) {

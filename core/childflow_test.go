@@ -157,8 +157,8 @@ func TestChildFlow_WithHooks(t *testing.T) {
 	}
 
 	hooks := &FlowHooks{
-		BeforeStep: func(hc HookContext) { record("BeforeStep:" + hc.StepName) },
-		AfterStep:  func(hc HookContext) { record("AfterStep:" + hc.StepName) },
+		BeforeStep: func(hc HookContext, _ FlowStateReader) { record("BeforeStep:" + hc.StepName) },
+		AfterStep:  func(hc HookContext, _ FlowStateReader) { record("AfterStep:" + hc.StepName) },
 	}
 
 	childFlow := NewFlow("child-flow").

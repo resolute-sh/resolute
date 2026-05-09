@@ -132,14 +132,14 @@ func (t *FlowTester) RunWithContext(ctx context.Context, flow *Flow, input FlowI
 	state := NewFlowState(input)
 	hooks := flow.Hooks()
 
-	invokeBeforeFlow(hooks, flow.Name())
+	invokeBeforeFlow(hooks, flow.Name(), state)
 	flowStart := time.Now()
 
 	for _, step := range flow.Steps() {
 		select {
 		case <-ctx.Done():
 			err := ctx.Err()
-			invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), err)
+			invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), err, state)
 			return state, err
 		default:
 		}
@@ -157,22 +157,22 @@ func (t *FlowTester) RunWithContext(ctx context.Context, flow *Flow, input FlowI
 			stepErr = t.executeSequentialStep(ctx, step, state, flow.Name(), hooks)
 		}
 		if stepErr != nil {
-			invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), stepErr)
+			invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), stepErr, state)
 			return state, stepErr
 		}
 	}
 
-	invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), nil)
+	invokeAfterFlow(hooks, flow.Name(), time.Since(flowStart), nil, state)
 	return state, nil
 }
 
 func (t *FlowTester) executeGateStep(_ context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
 	gate := step.gate
 
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
-	invokeBeforeNode(hooks, flowName, step.name, gate.Name())
+	invokeBeforeNode(hooks, flowName, step.name, gate.Name(), state)
 	nodeStart := time.Now()
 
 	t.mu.Lock()
@@ -185,23 +185,23 @@ func (t *FlowTester) executeGateStep(_ context.Context, step Step, state *FlowSt
 
 	if !hasMock {
 		err := fmt.Errorf("no gate mock registered for %q", gate.Name())
-		invokeAfterNode(hooks, flowName, step.name, gate.Name(), time.Since(nodeStart), err)
-		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+		invokeAfterNode(hooks, flowName, step.name, gate.Name(), time.Since(nodeStart), err, state)
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 		return err
 	}
 
 	result.DecidedAt = time.Now()
 	state.SetResult(gate.OutputKey(), result)
 
-	invokeAfterNode(hooks, flowName, step.name, gate.Name(), time.Since(nodeStart), nil)
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	invokeAfterNode(hooks, flowName, step.name, gate.Name(), time.Since(nodeStart), nil, state)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil, state)
 	return nil
 }
 
 func (t *FlowTester) executeChildrenStep(_ context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
 	child := step.children
 
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
 	t.mu.Lock()
@@ -214,13 +214,13 @@ func (t *FlowTester) executeChildrenStep(_ context.Context, step Step, state *Fl
 
 	if !hasMock {
 		err := fmt.Errorf("no child flow mock registered for %q", child.Name())
-		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 		return err
 	}
 
 	childState, err := mockFn(state)
 	if err != nil {
-		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+		invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 		return fmt.Errorf("child flow %s: %w", child.Name(), err)
 	}
 
@@ -230,49 +230,49 @@ func (t *FlowTester) executeChildrenStep(_ context.Context, step Step, state *Fl
 		}
 	}
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil, state)
 	return nil
 }
 
 func (t *FlowTester) executeSequentialStep(ctx context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
 	for _, node := range step.nodes {
-		invokeBeforeNode(hooks, flowName, step.name, node.Name())
+		invokeBeforeNode(hooks, flowName, step.name, node.Name(), state)
 		nodeStart := time.Now()
 
 		err := t.executeNode(ctx, node, state)
 
-		invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err)
+		invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err, state)
 		if err != nil {
-			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 			return err
 		}
 	}
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil, state)
 	return nil
 }
 
 func (t *FlowTester) executeParallelStep(ctx context.Context, step Step, state *FlowState, flowName string, hooks *FlowHooks) error {
-	invokeBeforeStep(hooks, flowName, step.name)
+	invokeBeforeStep(hooks, flowName, step.name, state)
 	stepStart := time.Now()
 
 	for _, node := range step.nodes {
-		invokeBeforeNode(hooks, flowName, step.name, node.Name())
+		invokeBeforeNode(hooks, flowName, step.name, node.Name(), state)
 		nodeStart := time.Now()
 
 		err := t.executeNode(ctx, node, state)
 
-		invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err)
+		invokeAfterNode(hooks, flowName, step.name, node.Name(), time.Since(nodeStart), err, state)
 		if err != nil {
-			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err)
+			invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), err, state)
 			return err
 		}
 	}
 
-	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil)
+	invokeAfterStep(hooks, flowName, step.name, time.Since(stepStart), nil, state)
 	return nil
 }
 
