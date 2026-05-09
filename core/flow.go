@@ -16,6 +16,7 @@ type Flow struct {
 	stateConfig *StateConfig
 	hooks       *FlowHooks
 	signals     []SignalDef // registered signals for non-blocking buffering
+	queries     []QueryDef  // registered queries for the flow
 }
 
 // Step represents one execution unit within a flow.
@@ -137,6 +138,19 @@ func (b *FlowBuilder) WithSignals(signals ...SignalDef) *FlowBuilder {
 	return b
 }
 
+// QueryDef defines a query handler for a flow.
+type QueryDef struct {
+	Name    string
+	Handler any // the query handler function
+}
+
+// WithQuery registers a query handler for this flow.
+// Query handlers are installed at workflow startup alongside signals.
+func (b *FlowBuilder) WithQuery(name string, handler any) *FlowBuilder {
+	b.flow.queries = append(b.flow.queries, QueryDef{Name: name, Handler: handler})
+	return b
+}
+
 // WithState overrides the default state backend (.resolute/).
 // Use this to configure cloud storage backends (S3, GCS) for production.
 func (b *FlowBuilder) WithState(cfg StateConfig) *FlowBuilder {
@@ -216,6 +230,13 @@ func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 	workflow.SetQueryHandler(ctx, "childWorkflows", func() (map[string]string, error) {
 		return state.ChildWorkflows(), nil
 	})
+
+	// Register custom queries
+	for _, q := range f.queries {
+		if err := workflow.SetQueryHandler(ctx, q.Name, q.Handler); err != nil {
+			return fmt.Errorf("register query %q: %w", q.Name, err)
+		}
+	}
 
 	err := f.executeInternal(ctx, state)
 
