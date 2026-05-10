@@ -138,16 +138,42 @@ func (b *FlowBuilder) WithSignals(signals ...SignalDef) *FlowBuilder {
 	return b
 }
 
-// QueryDef defines a query handler for a flow.
+// QueryDef defines a query handler for a flow. Either Handler is set (the
+// handler is constructed at builder time, by WithQuery) or Build is set (the
+// handler is constructed at execute time with access to the live FlowState,
+// by WithQueryState). Exactly one of the two is non-nil.
 type QueryDef struct {
 	Name    string
-	Handler any // the query handler function
+	Handler any                  // pre-built handler (WithQuery)
+	Build   func(*FlowState) any // built per execution against live FlowState (WithQueryState)
 }
 
 // WithQuery registers a query handler for this flow.
 // Query handlers are installed at workflow startup alongside signals.
 func (b *FlowBuilder) WithQuery(name string, handler any) *FlowBuilder {
 	b.flow.queries = append(b.flow.queries, QueryDef{Name: name, Handler: handler})
+	return b
+}
+
+// WithQueryState registers a query handler that returns the latest typed value
+// of S persisted at the given StateKey. Pairs with Loop[S]: the Loop runner
+// writes S to its StateKey on every transition (init, before/after each
+// iteration, finalize), so this query always observes a current value or the
+// zero value of S if no Loop has written yet.
+//
+// Use this in place of capturing a *S in a closure mutated from
+// AfterIteration; that pattern bypasses the read-only FlowStateReader contract
+// and forces every consumer to maintain a parallel pointer.
+func WithQueryState[S any](b *FlowBuilder, name, key string) *FlowBuilder {
+	b.flow.queries = append(b.flow.queries, QueryDef{
+		Name: name,
+		Build: func(fs *FlowState) any {
+			return func() (S, error) {
+				v, _ := GetSafe[S](fs, key)
+				return v, nil
+			}
+		},
+	})
 	return b
 }
 
@@ -235,7 +261,11 @@ func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 
 	// Register custom queries
 	for _, q := range f.queries {
-		if err := workflow.SetQueryHandler(ctx, q.Name, q.Handler); err != nil {
+		handler := q.Handler
+		if q.Build != nil {
+			handler = q.Build(state)
+		}
+		if err := workflow.SetQueryHandler(ctx, q.Name, handler); err != nil {
 			return fmt.Errorf("register query %q: %w", q.Name, err)
 		}
 	}
