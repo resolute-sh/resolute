@@ -9,9 +9,9 @@ func TestSignalBuffer_Take(t *testing.T) {
 
 	t.Run("empty buffer returns false", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
+		sb := newSignalBuffer()
 
-		val, ok := sb.Take("steer")
+		val, ok := sb.take("steer")
 		if ok {
 			t.Error("Take() should return false for empty buffer")
 		}
@@ -22,10 +22,10 @@ func TestSignalBuffer_Take(t *testing.T) {
 
 	t.Run("take returns injected signal", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "hello")
+		sb := newSignalBuffer()
+		sb.inject("steer", "hello")
 
-		val, ok := sb.Take("steer")
+		val, ok := sb.take("steer")
 		if !ok {
 			t.Error("Take() should return true after injection")
 		}
@@ -36,11 +36,11 @@ func TestSignalBuffer_Take(t *testing.T) {
 
 	t.Run("take removes signal", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "hello")
-		sb.Take("steer")
+		sb := newSignalBuffer()
+		sb.inject("steer", "hello")
+		sb.take("steer")
 
-		_, ok := sb.Take("steer")
+		_, ok := sb.take("steer")
 		if ok {
 			t.Error("Take() should return false after buffer is empty")
 		}
@@ -48,15 +48,15 @@ func TestSignalBuffer_Take(t *testing.T) {
 
 	t.Run("fifo order", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "first")
-		sb.Inject("steer", "second")
+		sb := newSignalBuffer()
+		sb.inject("steer", "first")
+		sb.inject("steer", "second")
 
-		val, _ := sb.Take("steer")
+		val, _ := sb.take("steer")
 		if val != "first" {
 			t.Errorf("first Take() = %v, want %q", val, "first")
 		}
-		val, _ = sb.Take("steer")
+		val, _ = sb.take("steer")
 		if val != "second" {
 			t.Errorf("second Take() = %v, want %q", val, "second")
 		}
@@ -68,9 +68,9 @@ func TestSignalBuffer_TakeAll(t *testing.T) {
 
 	t.Run("empty buffer returns false", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
+		sb := newSignalBuffer()
 
-		_, ok := sb.TakeAll("steer")
+		_, ok := sb.takeAll("steer")
 		if ok {
 			t.Error("TakeAll() should return false for empty buffer")
 		}
@@ -78,12 +78,12 @@ func TestSignalBuffer_TakeAll(t *testing.T) {
 
 	t.Run("returns all signals in order", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "a")
-		sb.Inject("steer", "b")
-		sb.Inject("steer", "c")
+		sb := newSignalBuffer()
+		sb.inject("steer", "a")
+		sb.inject("steer", "b")
+		sb.inject("steer", "c")
 
-		vals, ok := sb.TakeAll("steer")
+		vals, ok := sb.takeAll("steer")
 		if !ok {
 			t.Error("TakeAll() should return true")
 		}
@@ -100,11 +100,11 @@ func TestSignalBuffer_TakeAll(t *testing.T) {
 
 	t.Run("clears buffer", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "x")
-		sb.TakeAll("steer")
+		sb := newSignalBuffer()
+		sb.inject("steer", "x")
+		sb.takeAll("steer")
 
-		if sb.Len("steer") != 0 {
+		if sb.size("steer") != 0 {
 			t.Error("TakeAll() should clear the buffer")
 		}
 	})
@@ -115,9 +115,9 @@ func TestSignalBuffer_Peek(t *testing.T) {
 
 	t.Run("empty buffer returns false", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
+		sb := newSignalBuffer()
 
-		_, ok := sb.Peek("steer")
+		_, ok := sb.peek("steer")
 		if ok {
 			t.Error("Peek() should return false for empty buffer")
 		}
@@ -125,10 +125,10 @@ func TestSignalBuffer_Peek(t *testing.T) {
 
 	t.Run("returns oldest without removing", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "first")
+		sb := newSignalBuffer()
+		sb.inject("steer", "first")
 
-		val, ok := sb.Peek("steer")
+		val, ok := sb.peek("steer")
 		if !ok {
 			t.Error("Peek() should return true")
 		}
@@ -136,7 +136,7 @@ func TestSignalBuffer_Peek(t *testing.T) {
 			t.Errorf("Peek() = %v, want %q", val, "first")
 		}
 
-		val, ok = sb.Peek("steer")
+		val, ok = sb.peek("steer")
 		if !ok {
 			t.Error("Peek() should still return true after first peek")
 		}
@@ -151,28 +151,28 @@ func TestSignalBuffer_Len(t *testing.T) {
 
 	t.Run("empty buffer has len 0", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		if sb.Len("steer") != 0 {
+		sb := newSignalBuffer()
+		if sb.size("steer") != 0 {
 			t.Error("Len() should be 0 for empty buffer")
 		}
 	})
 
 	t.Run("counts buffered signals", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "x")
-		if sb.Len("steer") != 1 {
-			t.Errorf("Len() = %d, want 1", sb.Len("steer"))
+		sb := newSignalBuffer()
+		sb.inject("steer", "x")
+		if sb.size("steer") != 1 {
+			t.Errorf("Len() = %d, want 1", sb.size("steer"))
 		}
 	})
 
 	t.Run("decrements after take", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "x")
-		sb.Take("steer")
-		if sb.Len("steer") != 0 {
-			t.Errorf("Len() = %d, want 0", sb.Len("steer"))
+		sb := newSignalBuffer()
+		sb.inject("steer", "x")
+		sb.take("steer")
+		if sb.size("steer") != 0 {
+			t.Errorf("Len() = %d, want 0", sb.size("steer"))
 		}
 	})
 }
@@ -182,11 +182,11 @@ func TestSignalBuffer_PerSignalIsolation(t *testing.T) {
 
 	t.Run("signals are isolated by name", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer()
-		sb.Inject("steer", "steer-msg")
-		sb.Inject("cancel", struct{}{})
+		sb := newSignalBuffer()
+		sb.inject("steer", "steer-msg")
+		sb.inject("cancel", struct{}{})
 
-		steer, ok := sb.Take("steer")
+		steer, ok := sb.take("steer")
 		if !ok {
 			t.Error("Take(steer) should return true")
 		}
@@ -194,7 +194,7 @@ func TestSignalBuffer_PerSignalIsolation(t *testing.T) {
 			t.Errorf("Take(steer) = %v, want %q", steer, "steer-msg")
 		}
 
-		cancel, ok := sb.Take("cancel")
+		cancel, ok := sb.take("cancel")
 		if !ok {
 			t.Error("Take(cancel) should return true")
 		}
@@ -209,16 +209,16 @@ func TestSignalBuffer_MaxSizeDropOldest(t *testing.T) {
 
 	t.Run("drops oldest when max size exceeded", func(t *testing.T) {
 		t.Parallel()
-		sb := NewSignalBuffer(WithMaxSize(2))
-		sb.Inject("steer", "a")
-		sb.Inject("steer", "b")
-		sb.Inject("steer", "c")
+		sb := newSignalBuffer(withMaxSize(2))
+		sb.inject("steer", "a")
+		sb.inject("steer", "b")
+		sb.inject("steer", "c")
 
-		if sb.Len("steer") != 2 {
-			t.Errorf("Len() = %d, want 2", sb.Len("steer"))
+		if sb.size("steer") != 2 {
+			t.Errorf("Len() = %d, want 2", sb.size("steer"))
 		}
 
-		val, _ := sb.Take("steer")
+		val, _ := sb.take("steer")
 		if val != "b" {
 			t.Errorf("first Take() = %v, want %q", val, "b")
 		}

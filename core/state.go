@@ -65,7 +65,7 @@ func NewFlowState(input FlowInput) *FlowState {
 		input:   input.Data,
 		results: make(map[string]any),
 		cursors: make(map[string]Cursor),
-		signals: NewSignalBuffer(),
+		signals: newSignalBuffer(),
 	}
 }
 
@@ -153,12 +153,9 @@ func (s *FlowState) GetWindowMeta() WindowMeta {
 	return *s.windowMeta
 }
 
-// Signals returns the signal buffer for non-blocking signal polling.
-func (s *FlowState) Signals() *SignalBuffer {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.signals
-}
+// signals returns the underlying buffer. Internal: external callers go
+// through the typed accessors (TakeSignal[T], TakeAllSignals[T],
+// PeekSignal[T], InjectSignal[T], SignalCount) declared in signals.go.
 
 // NewBatchState creates an isolated state for a windowed batch.
 // Inherits input and cursors from parent. Results, window meta, and signals start empty.
@@ -170,7 +167,7 @@ func (s *FlowState) NewBatchState() *FlowState {
 		input:          s.input,
 		results:        make(map[string]any),
 		cursors:        make(map[string]Cursor),
-		signals:        NewSignalBuffer(),
+		signals:        newSignalBuffer(),
 		childWorkflows: make(map[string]string),
 	}
 	for k, v := range s.cursors {
@@ -188,7 +185,7 @@ func (s *FlowState) Snapshot() *FlowState {
 		input:          make(map[string][]byte),
 		results:        make(map[string]any),
 		cursors:        make(map[string]Cursor),
-		signals:        NewSignalBuffer(),
+		signals:        newSignalBuffer(),
 		childWorkflows: make(map[string]string),
 	}
 

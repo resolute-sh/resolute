@@ -130,13 +130,11 @@ func (b *FlowBuilder) ThenChildren(name string, config ChildFlowConfig) *FlowBui
 	return b
 }
 
-// WithSignals registers signals that this flow accepts.
-// Signal handlers are installed at workflow startup and buffer
-// payloads in FlowState.Signals for non-blocking consumption.
-func (b *FlowBuilder) WithSignals(signals ...SignalDef) *FlowBuilder {
-	b.flow.signals = append(b.flow.signals, signals...)
-	return b
-}
+// Signal registration moved to RegisterSignal[T] in signals.go — a typed
+// helper that wires the receive pump for a specific payload type. The
+// untyped WithSignals(...SignalDef) builder method was removed in favour of
+// type-parameterised registration; SignalDef itself is now an internal
+// record produced by RegisterSignal.
 
 // QueryDef defines a query handler for a flow. Either Handler is set (the
 // handler is constructed at builder time, by WithQuery) or Build is set (the
@@ -237,16 +235,15 @@ func (f *Flow) Execute(ctx workflow.Context, input FlowInput) error {
 
 	invokeBeforeFlow(f.hooks, f.name, state)
 
-	// Register signal handlers
+	// Register signal handlers via the typed pump installed by
+	// RegisterSignal[T]. Each pump receives directly into a value of its
+	// registered T (so Temporal's data converter does the typed
+	// deserialization) and injects the typed payload into the buffer.
 	for _, sig := range f.signals {
-		sigName := sig.Name
-		sigChan := workflow.GetSignalChannel(ctx, sigName)
+		sigDef := sig
+		sigChan := workflow.GetSignalChannel(ctx, sigDef.Name)
 		workflow.Go(ctx, func(gCtx workflow.Context) {
-			for {
-				var payload interface{}
-				sigChan.Receive(gCtx, &payload)
-				state.Signals().Inject(sigName, payload)
-			}
+			sigDef.pump(gCtx, sigChan, state)
 		})
 	}
 
